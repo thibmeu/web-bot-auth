@@ -20,32 +20,38 @@ export interface SignerSync {
   alg: Algorithm;
 }
 
-export type Verify<T> = (
-  data: string,
-  signature: Uint8Array,
-  params: Parameters,
-  components: Component[]
-) => T | Promise<T>;
+export type Verify<T> = {
+  (
+    data: string,
+    signature: Uint8Array,
+    params: Parameters,
+    components: Component[]
+  ): T | Promise<T>;
+  readonly alg?: Algorithm;
+};
 
-interface HeadersMap {
+export interface HeadersMap {
   get(name: string): string | null;
   set(name: string, value: string): void;
 }
 
-type Headers = Record<string, HeaderValue> | HeadersMap;
+export type Headers = Record<string, HeaderValue> | HeadersMap;
 
-export type HeaderValue = { toString(): string } | string | string[];
+export type HeaderValue = { toString(): string } | string | readonly string[];
 
 export interface RequestLike {
   method: string;
   url: string;
+  requestTarget?: string;
   protocol?: string;
   headers: Headers;
+  trailers?: Headers;
 }
 
 export interface ResponseLike {
   status: number;
   headers: Headers;
+  trailers?: Headers;
 }
 
 // Allows usage of the req parameter.
@@ -97,17 +103,27 @@ interface StandardParameters {
 export type Parameters = StandardParameters &
   Record<
     Parameter,
-    string | number | true | Date | { [Symbol.toStringTag]: () => string }
+    | string
+    | number
+    | boolean
+    | Date
+    | Uint8Array
+    | { [Symbol.toStringTag]: () => string }
   >;
 
 export type SignOptions = StandardParameters & {
   components?: Component[];
   key?: string;
+  parameters?: readonly SfParameter[];
+  signatureInputProfile?: "rfc9421" | "rfc9651-extension";
+  limits?: Partial<SignatureLimits>;
   signer: Signer;
   [name: Parameter]:
     | Component[]
     | ComponentWithParameters[]
     | StructuredFieldDictionaryComponent[]
+    | readonly SfParameter[]
+    | Partial<SignatureLimits>
     | Signer
     | string
     | number
@@ -120,11 +136,16 @@ export type SignOptions = StandardParameters & {
 export type SignSyncOptions = StandardParameters & {
   components?: Component[];
   key?: string;
+  parameters?: readonly SfParameter[];
+  signatureInputProfile?: "rfc9421" | "rfc9651-extension";
+  limits?: Partial<SignatureLimits>;
   signer: SignerSync;
   [name: Parameter]:
     | Component[]
     | ComponentWithParameters[]
     | StructuredFieldDictionaryComponent[]
+    | readonly SfParameter[]
+    | Partial<SignatureLimits>
     | SignerSync
     | string
     | number
@@ -142,3 +163,5 @@ export interface SignatureHeaders {
 export interface Directory {
   keys: JsonWebKey[];
 }
+import type { SfParameter } from "./structured-fields";
+import type { SignatureLimits } from "./rfc9421";

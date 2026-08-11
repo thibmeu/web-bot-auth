@@ -3,6 +3,8 @@
     "target": "es2021",
     "module": "es2022",
     "moduleResolution": "bundler",
-    "skipLibCheck": true
-  }
+    "skipLibCheck": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"]
+  },
+  "exclude": ["scripts"]
 }

@@ -1,6 +1,6 @@
 {
   "name": "http-message-sig",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "HTTP Message Signatures defined by RFC 9421",
   "main": "./dist/index.cjs",
   "module": "./dist/index.mjs",
@@ -26,6 +26,7 @@
     "build": "tsdown src/index.ts --format esm,cjs --target es2021",
     "prepublishOnly": "npm run build",
     "test": "vitest",
+    "typecheck": "tsc --noEmit",
     "watch": "npm run build -- --watch src"
   },
   "repository": {

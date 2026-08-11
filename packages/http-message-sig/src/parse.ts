@@ -1,131 +1,135 @@
+import { type HeaderValue, type Parameters, type Component } from "./types";
 import {
-  Component,
-  ComponentParameters,
-  HeaderValue,
-  Parameter,
-  Parameters,
-} from "./types";
-import { decode as base64Decode } from "./base64";
-import { parseDictionary, isInnerList } from "structured-headers";
+  parseAcceptSignatureField,
+  parseSignatureField,
+  parseSignatureInputField,
+  type SignatureInputProfile,
+  type SignatureLimits,
+} from "./rfc9421";
+import type { BareItem, SfParameter } from "./structured-fields";
+import { dateFromIntegerSeconds } from "./timestamps";
 
-function parseSfvDictionary(
+function legacyValue(name: string, value: BareItem): Parameters[string] {
+  if ((name === "created" || name === "expires") && value.type === "integer") {
+    const date = dateFromIntegerSeconds(value.value);
+    if (date === undefined)
+      throw new Error(`${name} timestamp is outside JavaScript Date range`);
+    return date;
+  }
+  switch (value.type) {
+    case "integer":
+      return value.value;
+    case "decimal":
+      return Number(value.value);
+    case "string":
+    case "token":
+    case "display-string":
+      return value.value;
+    case "bytes":
+      return value.value;
+    case "boolean":
+      return value.value;
+    case "date":
+      return new Date(value.value * 1000);
+  }
+}
+
+function legacyParameters(values: readonly SfParameter[]): Parameters {
+  const result: Parameters = {};
+  for (const { name, value } of values) result[name] = legacyValue(name, value);
+  return result;
+}
+
+function legacyComponents(
+  input: ReturnType<typeof parseSignatureInputField>[number]
+): Component[] {
+  return input.components.map(({ name, parameters }) => {
+    if (parameters.length === 0) return name;
+    const mapped = new Map<string, string | boolean>();
+    let dictionaryKey: string | undefined;
+    for (const parameter of parameters) {
+      if (
+        parameter.value.type !== "string" &&
+        parameter.value.type !== "boolean"
+      ) {
+        throw new Error(`Invalid component parameter ${parameter.name}`);
+      }
+      mapped.set(parameter.name, parameter.value.value);
+      if (parameter.name === "key" && parameter.value.type === "string") {
+        dictionaryKey = parameter.value.value;
+      }
+    }
+    return dictionaryKey === undefined
+      ? { name, parameters: mapped }
+      : { header: name, key: dictionaryKey, parameters: mapped };
+  });
+}
+
+function parseSingleInput(
   name: string,
-  header: HeaderValue
+  header: HeaderValue,
+  profile: SignatureInputProfile,
+  limits: Partial<SignatureLimits>
 ): { key: string; components: Component[]; parameters: Parameters } {
-  let dictionary;
+  const entries = parseSignatureInputField(header.toString(), profile, limits);
+  if (entries.length !== 1)
+    throw new Error(`Multiple signatures is not supported`);
+  const entry = entries[0];
+  if (entry === undefined)
+    throw new Error(`Invalid ${name} header. Invalid value`);
+  return {
+    key: entry.label,
+    components: legacyComponents(entry),
+    parameters: legacyParameters(entry.parameters),
+  };
+}
+
+export function parseSignatureInputHeader(
+  header: HeaderValue,
+  profile: SignatureInputProfile = "rfc9421",
+  limits: Partial<SignatureLimits> = {}
+): { key: string; components: Component[]; parameters: Parameters } {
   try {
-    dictionary = parseDictionary(header.toString());
+    return parseSingleInput("Signature-Input", header, profile, limits);
   } catch (error) {
     throw new Error(
-      `Invalid ${name} header; failed to parse as RFC 8941 dictionary: ${errorMessage(error)}`,
-      { cause: error }
+      `Invalid Signature-Input header; failed to parse as RFC 8941 dictionary: ${error instanceof Error ? error.message : String(error)}`
     );
   }
+}
 
-  if (dictionary.size > 1) {
+export function parseAcceptSignatureHeader(
+  header: HeaderValue,
+  profile: SignatureInputProfile = "rfc9421",
+  limits: Partial<SignatureLimits> = {}
+): { key: string; components: Component[]; parameters: Parameters } {
+  const entries = parseAcceptSignatureField(header.toString(), profile, limits);
+  if (entries.length !== 1)
     throw new Error(`Multiple signatures is not supported`);
-  }
-
-  const entry = dictionary.entries().next();
-
-  if (!entry.value) {
-    throw new Error(`Invalid ${name} header. Invalid value`);
-  }
-
-  const [key, innerlist] = entry.value;
-  if (!isInnerList(innerlist)) {
-    throw new Error(`Invalid ${name} header. Missing components`);
-  }
-
-  // innerlist is [Item[], Map] where each Item is [string, Map<string, string | boolean>]
-  const [cwp, params] = innerlist;
-
-  const parameters: Parameters = Object.fromEntries(params) as Record<
-    Parameter,
-    string | number | Date
-  >;
-  if (typeof parameters.created === "number")
-    parameters.created = new Date(parameters.created * 1000);
-  if (typeof parameters.expires === "number")
-    parameters.expires = new Date(parameters.expires * 1000);
-
-  const components: Component[] = cwp.map(([component, componentParams]) => {
-    if (typeof component !== "string") {
-      throw new Error(
-        `Failed to parse component ${component} in component list: type is not string`
-      );
-    }
-
-    if (componentParams.size === 0) {
-      return component;
-    }
-
-    const parameters: ComponentParameters = new Map();
-    let key: string | undefined;
-    for (const [paramName, paramValue] of componentParams.entries()) {
-      if (typeof paramValue !== "string" && typeof paramValue !== "boolean") {
-        throw new Error(
-          `Failed to parse parameter ${paramName} on ${component}: type is neither string nor boolean`
-        );
-      }
-
-      parameters.set(paramName, paramValue);
-      if (paramName === "key" && typeof paramValue === "string") {
-        key = paramValue;
-      }
-    }
-
-    if (key !== undefined) {
-      return {
-        header: component,
-        key,
-        parameters,
-      };
-    }
-
-    return {
-      name: component,
-      parameters,
-    };
-  });
-
-  return { key, components, parameters };
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-export function parseSignatureInputHeader(header: HeaderValue): {
-  key: string;
-  components: Component[];
-  parameters: Parameters;
-} {
-  return parseSfvDictionary("Signature-Input", header);
-}
-
-export function parseAcceptSignatureHeader(header: HeaderValue): {
-  key: string;
-  components: Component[];
-  parameters: Parameters;
-} {
-  return parseSfvDictionary("Accept-Signature", header);
+  const entry = entries[0];
+  if (entry === undefined)
+    throw new Error(`Invalid Accept-Signature header. Invalid value`);
+  return {
+    key: entry.label,
+    components: legacyComponents(entry),
+    parameters: legacyParameters(entry.parameters),
+  };
 }
 
 export function parseSignatureHeader(
   key: string,
-  header: HeaderValue
+  header: HeaderValue,
+  limits: Partial<SignatureLimits> = {}
 ): Uint8Array {
-  const signatureMatch = header
-    .toString()
-    .match(/^([\w-]+)=:([A-Za-z0-9+/=]+):$/);
-  if (!signatureMatch) throw new Error("Invalid Signature header");
-
-  const [, signatureKey, signature] = signatureMatch;
-  if (signatureKey !== key)
+  const entries = parseSignatureField(header.toString(), limits);
+  if (entries.length !== 1)
+    throw new Error("Multiple signatures is not supported");
+  const entry = entries[0];
+  if (entry === undefined) throw new Error("Invalid Signature header");
+  if (entry.label !== key) {
     throw new Error(
-      `Invalid Signature header. Key mismatch ${signatureKey} !== ${key}`
+      `Invalid Signature header. Key mismatch ${entry.label} !== ${key}`
     );
-
-  return base64Decode(signature);
+  }
+  return entry.bytes;
 }

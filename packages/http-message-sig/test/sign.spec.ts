@@ -29,6 +29,78 @@ describe("sign", () => {
   const expectedHashBase64 = base64Encode(expectedHash);
 
   describe("request", () => {
+    it("enforces the serialized Signature-Input limit before signing", async () => {
+      let calls = 0;
+      const signer: Signer = {
+        keyid: "test-key",
+        alg: "hmac-sha256",
+        sign() {
+          calls += 1;
+          return expectedHash;
+        },
+      };
+      await expect(
+        signatureHeaders(sampleRequest, {
+          signer,
+          components: ["@method"],
+          created,
+          custom: '"'.repeat(40),
+          limits: { maxSignatureInputBytes: 100 },
+        })
+      ).rejects.toThrow("Signature-Input byte limit");
+      expect(calls).toBe(0);
+    });
+
+    it("enforces combined parameter limits before signing", async () => {
+      let calls = 0;
+      const signer: Signer = {
+        keyid: "test-key",
+        alg: "hmac-sha256",
+        sign() {
+          calls += 1;
+          return expectedHash;
+        },
+      };
+      await expect(
+        signatureHeaders(sampleRequest, {
+          signer,
+          components: ["@method"],
+          custom: "value",
+          limits: { maxParametersPerSignature: 3 },
+        })
+      ).rejects.toThrow("signature parameter limit");
+      expect(calls).toBe(0);
+    });
+
+    it("bounds raw and serialized signer output", async () => {
+      const rawSigner: Signer = {
+        keyid: "key",
+        alg: "hmac-sha256",
+        sign: () => new Uint8Array(5),
+      };
+      await expect(
+        signatureHeaders(sampleRequest, {
+          signer: rawSigner,
+          components: ["@method"],
+          limits: { maxSignatureBytes: 4 },
+        })
+      ).rejects.toThrow("Signature byte limit");
+
+      const fieldSigner: Signer = {
+        keyid: "key",
+        alg: "hmac-sha256",
+        sign: () => new Uint8Array([1]),
+      };
+      await expect(
+        signatureHeaders(sampleRequest, {
+          signer: fieldSigner,
+          key: "sig1",
+          components: ["@method"],
+          limits: { maxSignatureBytes: 8 },
+        })
+      ).rejects.toThrow("Signature field byte limit");
+    });
+
     it("should apply default components", async () => {
       const expectedData = [
         '"@method": POST',

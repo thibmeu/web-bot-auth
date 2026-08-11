@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { Component, Parameters, RequestLike } from "../src";
+import { Component, Parameters, RequestLike, ResponseLike } from "../src";
 import {
   buildSignatureInputString,
   buildSignedData,
@@ -48,6 +48,64 @@ describe("build", () => {
         extractHeader({ headers } as unknown as RequestLike, "missing")
       ).to.equal("");
     });
+
+    it("preserves internal whitespace while normalizing OWS and obs-fold", () => {
+      expect(
+        extractHeader(
+          {
+            status: 0,
+            headers: { Example: " \talpha  \tbeta\r\n\t gamma\t " },
+          },
+          "example"
+        )
+      ).toBe("alpha  \tbeta gamma");
+      expect(() =>
+        extractHeader(
+          { status: 0, headers: { Example: "alpha\r\nbeta" } },
+          "example"
+        )
+      ).toThrow("CR or LF");
+    });
+
+    it("rejects sparse and separator-oversized value arrays before joining", () => {
+      const sparse: string[] = [];
+      sparse.length = 2;
+      sparse[1] = "value";
+      expect(() =>
+        extractHeader({ status: 0, headers: { Example: sparse } }, "example")
+      ).toThrow("sparse");
+
+      let reads = 0;
+      const oversized = new Proxy(["value"], {
+        get(target, property) {
+          if (property === "length") return 10;
+          if (property === "0") reads += 1;
+          return Reflect.get(target, property, target);
+        },
+      });
+      expect(() =>
+        extractHeader(
+          { status: 0, headers: { Example: oversized } },
+          "example",
+          8
+        )
+      ).toThrow("byte limit");
+      expect(reads).toBe(0);
+    });
+
+    it("combines and budgets all case-variant field entries", () => {
+      const message: ResponseLike = {
+        status: 200,
+        headers: { Example: "one", example: ["two", "three"] },
+      };
+      expect(extractHeader(message, "EXAMPLE")).toBe("one, two, three");
+      expect(() => extractHeader(message, "example", 100, 2)).toThrow(
+        "occurrence limit"
+      );
+      expect(() => extractHeader(message, "example", 10, 3)).toThrow(
+        "byte limit"
+      );
+    });
   });
 
   describe("extractComponent", () => {
@@ -60,6 +118,15 @@ describe("build", () => {
         "@method"
       );
       expect(result).to.equal("POST");
+    });
+
+    it("preserves @method case", () => {
+      expect(
+        extractComponent(
+          { method: "CuStOm", url: "https://example.com/", headers: {} },
+          "@method"
+        )
+      ).toBe("CuStOm");
     });
 
     it("correctly extracts the @target-uri", () => {
@@ -188,6 +255,55 @@ describe("build", () => {
   });
 
   describe("buildSignatureInputString", () => {
+    it("rejects sparse and oversized component arrays before mapping", () => {
+      const sparse: Component[] = [];
+      sparse.length = 2;
+      sparse[1] = "date";
+      expect(() => buildSignatureInputString(sparse, {})).toThrow("sparse");
+
+      let reads = 0;
+      const oversized = new Proxy<Component[]>(["date"], {
+        get(target, property) {
+          if (property === "length") return Number.MAX_SAFE_INTEGER;
+          if (property === "0") reads += 1;
+          return Reflect.get(target, property, target);
+        },
+      });
+      expect(() => buildSignatureInputString(oversized, {})).toThrow(
+        "limit exceeded"
+      );
+      expect(reads).toBe(0);
+    });
+
+    it("enforces combined signature and per-component parameter limits", () => {
+      expect(() =>
+        buildSignatureInputString(
+          ["@method"],
+          { created: new Date(0), custom: "value" },
+          [],
+          "rfc8941",
+          { maxParametersPerSignature: 1 }
+        )
+      ).toThrow("signature parameter limit");
+      expect(() =>
+        buildSignatureInputString(
+          [
+            {
+              name: "example",
+              parameters: new Map([
+                ["sf", true],
+                ["tr", true],
+              ]),
+            },
+          ],
+          {},
+          [],
+          "rfc8941",
+          { maxComponentParameters: 1 }
+        )
+      ).toThrow("component parameter limit");
+    });
+
     describe("specification test cases", () => {
       it("constructs minimal example", () => {
         const components: Component[] = [];
@@ -274,6 +390,125 @@ describe("build", () => {
           '"content-type": application/json\n' +
           '"@signature-params": ("@authority" "content-type");created=1618884475;keyid="test-key-rsa-pss"'
       );
+    });
+
+    it("uses HTTP field bytes and trailer occurrences for bs", () => {
+      const data = buildSignedData(
+        {
+          ...testRequest,
+          trailers: { "X-Bytes": " \té\r\n ÿ\t " },
+        },
+        [
+          {
+            name: "x-bytes",
+            parameters: new Map([
+              ["bs", true],
+              ["tr", true],
+            ]),
+          },
+        ],
+        '("x-bytes";bs;tr)'
+      );
+      expect(data).to.equal(
+        '"x-bytes";bs;tr: :6SD/:\n"@signature-params": ("x-bytes";bs;tr)'
+      );
+    });
+
+    it("aggregates case-variant bs occurrences and limits", () => {
+      const request: RequestLike = {
+        method: "GET",
+        url: "https://example.com/",
+        headers: { "X-Bytes": "a", "x-bytes": ["b", "c"] },
+      };
+      const component: Component = {
+        name: "x-bytes",
+        parameters: new Map([["bs", true]]),
+      };
+      expect(buildSignedData(request, [component], '("x-bytes";bs)')).toContain(
+        '"x-bytes";bs: :YQ==:, :Yg==:, :Yw==:'
+      );
+      expect(() =>
+        buildSignedData(request, [component], '("x-bytes";bs)', {
+          maxFieldOccurrences: 2,
+        })
+      ).toThrow("occurrence limit");
+      expect(() =>
+        buildSignedData(request, [component], '("x-bytes";bs)', {
+          maxFieldBytes: 6,
+        })
+      ).toThrow("byte limit");
+    });
+
+    it("shares field limits across covered components", () => {
+      const request: RequestLike = {
+        method: "GET",
+        url: "https://example.com/",
+        headers: { A: "1", B: "2" },
+      };
+      expect(() =>
+        buildSignedData(request, ["a", "b"], '("a" "b")', {
+          maxFieldOccurrences: 1,
+        })
+      ).toThrow("occurrence limit");
+      expect(() =>
+        buildSignedData(request, ["a", "b"], '("a" "b")', {
+          maxFieldBytes: 3,
+        })
+      ).toThrow("byte limit");
+      expect(
+        buildSignedData(request, ["a", "b"], '("a" "b")', {
+          maxFieldBytes: 4,
+        })
+      ).toContain('"b": 2');
+    });
+
+    it("counts exact UTF-8 bytes for fields and the signature base", () => {
+      const request: RequestLike = {
+        method: "GET",
+        url: "https://example.com/",
+        headers: { A: "é" },
+      };
+      expect(() =>
+        buildSignedData(request, ["a"], '("a")', { maxFieldBytes: 2 })
+      ).toThrow("byte limit");
+      expect(
+        buildSignedData(request, ["a"], '("a")', { maxFieldBytes: 3 })
+      ).toContain('"a": é');
+
+      const expected = '"@signature-params": é';
+      const exactBytes = new TextEncoder().encode(expected).length;
+      expect(() =>
+        buildSignedData(request, [], "é", {
+          maxSignatureBaseBytes: exactBytes - 1,
+        })
+      ).toThrow("signature base byte limit");
+      expect(
+        buildSignedData(request, [], "é", {
+          maxSignatureBaseBytes: exactBytes,
+        })
+      ).toBe(expected);
+    });
+
+    it("preserves an explicit raw request target", () => {
+      expect(
+        extractComponent(
+          {
+            ...testRequest,
+            method: "CONNECT",
+            requestTarget: "example.com:443",
+          },
+          "@request-target"
+        )
+      ).to.equal("example.com:443");
+    });
+
+    it("allows CONNECT authority coverage without requestTarget", () => {
+      const data = buildSignedData(
+        { ...testRequest, method: "CONNECT" },
+        ["@authority"],
+        '("@authority")'
+      );
+      expect(data).toContain('"@authority": example.com');
     });
 
     it("constructs structured-field dictionary example", () => {

@@ -104,14 +104,37 @@ export function signerFromJWK(jwk: JsonWebKey): Promise<Signer> {
   }
 }
 
-export function verifier(
-  key: CryptoKey
-): (
-  data: string,
-  signature: Uint8Array,
-  params: VerificationParams
-) => Promise<void> {
-  return async (
+function verifierAlgorithm(key: CryptoKey): Algorithm {
+  switch (key.algorithm.name) {
+    case "Ed25519":
+      return "ed25519";
+    case "RSA-PSS": {
+      if (!("hash" in key.algorithm)) {
+        throw new Error("RSA-PSS key does not declare a hash algorithm");
+      }
+      const hash = key.algorithm.hash;
+      const hashName =
+        typeof hash === "string"
+          ? hash
+          : hash !== null &&
+              typeof hash === "object" &&
+              "name" in hash &&
+              typeof hash.name === "string"
+            ? hash.name
+            : undefined;
+      if (hashName !== "SHA-512") {
+        throw new Error(`Unsupported RSA-PSS hash algorithm: ${hashName}`);
+      }
+      return "rsa-pss-sha512";
+    }
+    default:
+      throw new Error(`Unsupported algorithm: ${key.algorithm.name}`);
+  }
+}
+
+export function verifier(key: CryptoKey): Verify<void> {
+  const alg = verifierAlgorithm(key);
+  const verifySignature = async (
     data: string,
     signature: Uint8Array,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -119,13 +142,13 @@ export function verifier(
   ) => {
     const encodedData = new TextEncoder().encode(data);
 
-    const cryptoParams: Parameters<typeof crypto.subtle.verify>[0] =
-      key.algorithm;
+    let cryptoParams: Parameters<typeof crypto.subtle.verify>[0];
     switch (key.algorithm.name) {
       case "Ed25519":
+        cryptoParams = { name: "Ed25519" };
         break;
       case "RSA-PSS":
-        cryptoParams["saltLength"] = 64;
+        cryptoParams = { name: "RSA-PSS", saltLength: 64 };
         break;
       default:
         throw new Error(`Unsupported algorithm: ${key.algorithm.name}`);
@@ -134,7 +157,7 @@ export function verifier(
     const isValid = await crypto.subtle.verify(
       cryptoParams,
       key,
-      signature,
+      Uint8Array.from(signature),
       encodedData
     );
 
@@ -142,6 +165,7 @@ export function verifier(
       throw new Error("invalid signature");
     }
   };
+  return Object.assign(verifySignature, { alg });
 }
 
 export async function verifierFromJWK(jwk: JsonWebKey): Promise<Verify<void>> {

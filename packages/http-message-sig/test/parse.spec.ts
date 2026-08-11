@@ -50,7 +50,7 @@ describe("parse.ts", () => {
           {
             header: "signature-agent",
             key: "agent2",
-            parameters: new Map([
+            parameters: new Map<string, string | boolean>([
               ["key", "agent2"],
               ["req", true],
             ]),
