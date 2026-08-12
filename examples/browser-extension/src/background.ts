@@ -1,6 +1,5 @@
 import {
   Algorithm,
-  KeyedSigner,
   signatureHeadersSync,
   helpers,
   jwkToKeyID,
@@ -19,37 +18,39 @@ const MAX_AGE_IN_MS = 1000 * 60 * 60; // 1 hour
 const SIGNATURE_AGENT =
   "https://http-message-signatures-example.research.cloudflare.com";
 
-// libsodium signs synchronously, which is what a blocking listener needs. A signer may return the
-// signature directly rather than a Promise of it, so no wrapper is involved.
-function ed25519Signer(jwk: JsonWebKey): KeyedSigner {
-  const sodium = _sodium;
+class Ed25519Signer {
+  public alg: Algorithm = "ed25519";
+  public keyid: string;
+  private privateKey: Uint8Array<ArrayBuffer>;
 
-  // Base64URL decode helper
-  const base64urlDecode = (str) =>
-    sodium.from_base64(str, sodium.base64_variants.URLSAFE_NO_PADDING);
+  constructor(public jwk: JsonWebKey) {
+    const sodium = _sodium;
 
-  // Decode keys
-  const privateKey = base64urlDecode(jwk.d); // 32 bytes
-  const publicKey = base64urlDecode(jwk.x); // 32 bytes
+    // Base64URL decode helper
+    const base64urlDecode = (str) =>
+      sodium.from_base64(str, sodium.base64_variants.URLSAFE_NO_PADDING);
 
-  // Build the full 64-byte secret key: privateKey || publicKey
-  const fullSecretKey = new Uint8Array(64);
-  fullSecretKey.set(privateKey);
-  fullSecretKey.set(publicKey, 32);
+    // Decode keys
+    const privateKey = base64urlDecode(jwk.d); // 32 bytes
+    const publicKey = base64urlDecode(jwk.x); // 32 bytes
 
-  const alg: Algorithm = "ed25519";
-  return {
-    alg,
+    // Build the full 64-byte secret key: privateKey || publicKey
+    const fullSecretKey = new Uint8Array(64);
+    fullSecretKey.set(privateKey);
+    fullSecretKey.set(publicKey, 32);
+
+    this.privateKey = fullSecretKey;
+
     // NOTE: this MUST be computed from the public key bytes. It just so happen Chrome does not easily allow to perform a sha256 synchronously
-    keyid: KEY_ID,
-    signer: () => ({
-      alg,
-      sign: (data) =>
-        sodium
-          .crypto_sign(data, fullSecretKey)
-          .slice(0, sodium.crypto_sign_BYTES),
-    }),
-  };
+    this.keyid = KEY_ID;
+  }
+
+  signSync(data: string): Uint8Array {
+    const sodium = _sodium;
+    const message = sodium.from_string(data);
+    const signedMessage = sodium.crypto_sign(message, this.privateKey);
+    return signedMessage.slice(0, sodium.crypto_sign_BYTES);
+  }
 }
 
 chrome.webRequest.onBeforeSendHeaders.addListener(
@@ -65,7 +66,7 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
       headers: details.requestHeaders?.map((h) => [h.name, h.value!])!,
     });
     const now = new Date();
-    const headers = signatureHeadersSync(request, ed25519Signer(jwk), {
+    const headers = signatureHeadersSync(request, new Ed25519Signer(jwk), {
       components: recommendedComponents("sig1"),
       created: now,
       expires: new Date(now.getTime() + MAX_AGE_IN_MS),

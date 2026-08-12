@@ -1,254 +1,685 @@
-import { vi, describe, it, expect } from "vitest";
-import {
-  generateNonce,
-  REQUEST_COMPONENTS,
-  signatureHeaders,
-  signatureHeadersSync,
-  validateNonce,
-  NONCE_LENGTH_IN_BYTES,
-  SIGNATURE_AGENT_HEADER,
-  verify,
-  recommendedComponents,
-} from "../src/index";
-import type { KeyedSigner } from "../src/crypto";
-import { signerFromJWK, verifierFromJWK } from "../src/crypto";
-import { b64Tou8, u8ToB64 } from "../src/base64";
+import { describe, expect, it } from "vitest";
 
-import vectors1 from "./test_data/web_bot_auth_architecture_v1.json";
-import vectors2 from "./test_data/web_bot_auth_architecture_v2.json";
+import * as webBotAuth from "../src/index";
+import { verifierFromJWK } from "../src/crypto";
+import architectureVectors from "./test_data/web_bot_auth_architecture_v2.json";
 
-const vectors = [...vectors1, ...vectors2];
-type Vectors = (typeof vectors)[number];
+const vNext = webBotAuth;
 
-describe.each(vectors)("Web-bot-auth-ed25519-Vector-%#", (v: Vectors) => {
-  it("should pass IETF draft test vectors", async () => {
-    const signer = await signerFromJWK(v.key);
+const request = {
+  method: "POST",
+  url: "https://example.com/path",
+  headers: { "content-type": "application/json" },
+};
 
-    const headers = new Headers();
-    if (v.signature_agent) {
-      headers.append(SIGNATURE_AGENT_HEADER, v.signature_agent);
-    }
-    const request = new Request(v.target_url, { headers });
-    const signedHeaders = await signatureHeaders(request, signer, {
-      components: Object.hasOwnProperty.call(v, "signature_agent_key")
-        ? recommendedComponents(v["signature_agent_key"])
-        : v.signature_agent
-          ? ["@authority", "signature-agent"]
-          : recommendedComponents(),
-      created: new Date(v.created_ms),
-      expires: new Date(v.expires_ms),
-      nonce: v.nonce,
-      key: v.label,
+describe("architecture vectors", () => {
+  for (const vector of architectureVectors) {
+    it(`verifies ${vector.key.kty} ${vector.label}`, async () => {
+      const headers: Record<string, string> = {
+        signature: vector.signature,
+        "signature-input": vector.signature_input,
+      };
+      if (vector.signature_agent !== undefined) {
+        headers["signature-agent"] = vector.signature_agent;
+      }
+      await expect(
+        webBotAuth.verify(
+          { method: "GET", url: vector.target_url, headers },
+          await verifierFromJWK(vector.key),
+          { label: vector.label }
+        )
+      ).resolves.toMatchObject({ keyid: expect.any(String) });
     });
-
-    expect(signedHeaders["Signature-Input"]).toBe(v.signature_input);
-
-    // The synchronous path composes createSignatureBase() instead of createSignature(), so it has
-    // to reproduce the same Signature-Input. Only the signer differs: Web Crypto cannot sign
-    // synchronously, so a stub stands in for the bytes.
-    const syncSigner: KeyedSigner = {
-      alg: signer.alg,
-      keyid: signer.keyid,
-      signer: () => ({
-        alg: signer.alg,
-        sign: (data) => new Uint8Array(data.length),
-      }),
-    };
-    const syncHeaders = signatureHeadersSync(request, syncSigner, {
-      components: Object.hasOwnProperty.call(v, "signature_agent_key")
-        ? recommendedComponents(v["signature_agent_key"])
-        : v.signature_agent
-          ? ["@authority", "signature-agent"]
-          : recommendedComponents(),
-      created: new Date(v.created_ms),
-      expires: new Date(v.expires_ms),
-      nonce: v.nonce,
-      key: v.label,
-    });
-    expect(syncHeaders["Signature-Input"]).toBe(v.signature_input);
-
-    // Appending signed header to the request, given that's what the origin receives
-    headers.append("Signature", signedHeaders["Signature"]);
-    headers.append("Signature-Input", signedHeaders["Signature-Input"]);
-    const signedRequest = new Request(request.url, {
-      headers,
-    });
-
-    vi.setSystemTime(new Date(v.created_ms));
-    expect(
-      await verify(signedRequest, await verifierFromJWK(v.key))
-    ).toBeUndefined();
-    vi.useRealTimers();
-  });
-});
-
-describe("custom components", () => {
-  const ed25519Key =
-    vectors.find((v) => v.key.kty === "OKP")?.key ?? vectors[0].key;
-
-  it("should sign with custom components including additional headers", async () => {
-    const signer = await signerFromJWK(ed25519Key);
-
-    const headers = new Headers();
-    headers.append(SIGNATURE_AGENT_HEADER, "https://example.bot.com");
-    headers.append("accept", "text/html");
-    const request = new Request("https://example.com", { headers });
-
-    const signedHeaders = await signatureHeaders(request, signer, {
-      created: new Date(1735689600000),
-      expires: new Date(1735693200000),
-      components: [...REQUEST_COMPONENTS, "accept"],
-    });
-
-    // Verify that the Signature-Input includes the custom component
-    expect(signedHeaders["Signature-Input"]).toContain('"accept"');
-    expect(signedHeaders["Signature-Input"]).toContain('"@authority"');
-    expect(signedHeaders["Signature-Input"]).toContain('"signature-agent"');
-  });
-
-  it("should reject custom components missing signature-agent when header is present", async () => {
-    const signer = await signerFromJWK(ed25519Key);
-
-    const headers = new Headers();
-    headers.append(SIGNATURE_AGENT_HEADER, "https://example.bot.com");
-    const request = new Request("https://example.com", { headers });
-
-    expect(() =>
-      signatureHeaders(request, signer, {
-        created: new Date(1735689600000),
-        expires: new Date(1735693200000),
-        components: ["@authority"], // missing signature-agent
-      })
-    ).toThrow(`${SIGNATURE_AGENT_HEADER} is required in params.component`);
-  });
-
-  it("should allow custom components without signature-agent when header is absent", async () => {
-    const signer = await signerFromJWK(ed25519Key);
-
-    const request = new Request("https://example.com");
-
-    const signedHeaders = await signatureHeaders(request, signer, {
-      created: new Date(1735689600000),
-      expires: new Date(1735693200000),
-      components: ["@authority"],
-    });
-
-    expect(signedHeaders["Signature-Input"]).toContain('"@authority"');
-    expect(signedHeaders["Signature-Input"]).not.toContain('"signature-agent"');
-  });
-});
-
-describe("covered component enforcement (GHSA-x9cc-346q-g27m)", () => {
-  const ed25519Key =
-    vectors.find((v) => v.key.kty === "OKP")?.key ?? vectors[0].key;
-  const created = new Date(1735689600000);
-  const expires = new Date(1735693200000);
-
-  async function signedRequestWith(components: string[]): Promise<Request> {
-    const signer = await signerFromJWK(ed25519Key);
-    const request = new Request("https://example.com/public");
-    const signedHeaders = await signatureHeaders(request, signer, {
-      created,
-      expires,
-      components,
-    });
-    const headers = new Headers();
-    headers.append("Signature", signedHeaders["Signature"]);
-    headers.append("Signature-Input", signedHeaders["Signature-Input"]);
-    return new Request(request.url, { headers });
   }
-
-  it("rejects a signature that covers no request components", async () => {
-    const signedRequest = await signedRequestWith([]);
-    vi.setSystemTime(created);
-    await expect(
-      verify(signedRequest, await verifierFromJWK(ed25519Key))
-    ).rejects.toThrow("signature must cover @authority or @target-uri");
-    vi.useRealTimers();
-  });
-
-  it("accepts a signature covering @authority", async () => {
-    const signedRequest = await signedRequestWith(["@authority"]);
-    vi.setSystemTime(created);
-    await expect(
-      verify(signedRequest, await verifierFromJWK(ed25519Key))
-    ).resolves.toBeUndefined();
-    vi.useRealTimers();
-  });
-
-  it("accepts a signature covering @target-uri", async () => {
-    const signedRequest = await signedRequestWith(["@target-uri"]);
-    vi.setSystemTime(created);
-    await expect(
-      verify(signedRequest, await verifierFromJWK(ed25519Key))
-    ).resolves.toBeUndefined();
-    vi.useRealTimers();
-  });
 });
 
-describe("nonce", () => {
-  describe("generateNonce", () => {
-    it("should generate a base64 string", () => {
-      const nonce = generateNonce();
-      expect(typeof nonce).toBe("string");
-      // Base64 regex pattern
-      expect(() => b64Tou8(nonce)).not.toThrowError();
-    });
-
-    it("should generate nonce with correct length when decoded", () => {
-      const nonce = generateNonce();
-      const decoded = b64Tou8(nonce);
-      expect(decoded.length).toBe(NONCE_LENGTH_IN_BYTES);
-    });
-
-    it("should generate unique nonces", () => {
-      const nonce1 = generateNonce();
-      const nonce2 = generateNonce();
-      const nonce3 = generateNonce();
-      expect(nonce1).not.toBe(nonce2);
-      expect(nonce2).not.toBe(nonce3);
-      expect(nonce1).not.toBe(nonce3);
-    });
+describe("custom parameters", () => {
+  it("rejects empty asymmetric signer output", async () => {
+    const now = new Date();
+    await expect(
+      vNext.signatureHeaders(
+        request,
+        {
+          keyid: "test-key",
+          alg: "ed25519",
+          sign: () => new Uint8Array(),
+        },
+        {
+          created: now,
+          expires: new Date(now.getTime() + 60_000),
+          components: ["@authority"],
+        }
+      )
+    ).rejects.toThrow("Signature bytes must not be empty");
   });
 
-  describe("validateNonce", () => {
-    it("should validate correctly generated nonces", () => {
-      const nonce = generateNonce();
-      expect(validateNonce(nonce)).toBe(true);
-    });
-
-    it("should reject invalid base64 strings", () => {
-      expect(validateNonce("not-base64!@#$")).toBe(false);
-    });
-
-    it("should reject empty string", () => {
-      expect(validateNonce("")).toBe(false);
-    });
-
-    it("should reject nonces of incorrect length", () => {
-      // Create a small base64 string
-      const shortNonce = btoa("too short");
-      expect(validateNonce(shortNonce)).toBe(false);
-
-      // Create a long base64 string
-      const longArray = new Uint8Array(NONCE_LENGTH_IN_BYTES + 10);
-      crypto.getRandomValues(longArray);
-      const longNonce = u8ToB64(longArray);
-      expect(validateNonce(longNonce)).toBe(false);
-    });
-
-    it.each([[null], [undefined], [123], [{}], [[]], [true]])(
-      "should handle invalid input type: %s",
-      (invalidInput: unknown) => {
-        expect(validateNonce(invalidInput as string)).toBe(false);
+  it("returns every authenticated extension value", async () => {
+    const now = new Date();
+    const fields = await vNext.signatureHeaders(
+      request,
+      {
+        keyid: "test-key",
+        alg: "ed25519",
+        sign: () => new Uint8Array([1, 2, 3]),
+      },
+      {
+        created: now,
+        expires: new Date(now.getTime() + 60_000),
+        components: ["@method", "@authority", "@path"],
+        signatureInputProfile: "rfc9651-extension",
+        extensions: [
+          { name: "integer", value: 1 },
+          { name: "decimal", value: vNext.decimal(1.5) },
+          { name: "string", value: "value" },
+          { name: "token", value: vNext.token("value") },
+          { name: "bytes", value: new Uint8Array([1, 2]) },
+          { name: "boolean", value: false },
+          { name: "date", value: vNext.date(1) },
+          { name: "display", value: vNext.displayString("cafe") },
+        ],
       }
     );
-
-    it("should validate multiple generated nonces", () => {
-      for (let i = 0; i < 10; i++) {
-        const nonce = generateNonce();
-        expect(validateNonce(nonce)).toBe(true);
+    const verified = await vNext.verify(
+      {
+        ...request,
+        headers: {
+          ...request.headers,
+          signature: fields.Signature,
+          "signature-input": fields["Signature-Input"],
+        },
+      },
+      {
+        keyid: "test-key",
+        alg: "ed25519",
+        verify: () => true,
+      },
+      {
+        signatureInputProfile: "rfc9651-extension",
+        transform: (params: webBotAuth.VerificationParams) => params.extensions,
       }
+    );
+    expect(verified.map(({ name }) => name)).toEqual([
+      "integer",
+      "decimal",
+      "string",
+      "token",
+      "bytes",
+      "boolean",
+      "date",
+      "display",
+    ]);
+  });
+
+  it("rejects reserved custom parameter collisions", async () => {
+    const now = new Date();
+    await expect(
+      vNext.signatureHeaders(
+        request,
+        {
+          keyid: "test-key",
+          alg: "ed25519",
+          sign: () => new Uint8Array(),
+        },
+        {
+          created: now,
+          expires: new Date(now.getTime() + 60_000),
+          components: ["@authority"],
+          extensions: [{ name: "keyid", value: "collision" }],
+        }
+      )
+    ).rejects.toThrow("collides with a reserved parameter");
+  });
+
+  it("supports an ECDSA provider with an omitted alg parameter", async () => {
+    const now = new Date();
+    const fields = await vNext.signatureHeaders(
+      request,
+      {
+        keyid: "test-key",
+        alg: "ecdsa-p256-sha256",
+        sign: () => new Uint8Array([1, 2, 3]),
+      },
+      {
+        created: now,
+        expires: new Date(now.getTime() + 60_000),
+        components: ["@authority"],
+      }
+    );
+    expect(fields["Signature-Input"]).not.toContain(";alg=");
+    await expect(
+      vNext.verify(
+        {
+          ...request,
+          headers: {
+            ...request.headers,
+            signature: fields.Signature,
+            "signature-input": fields["Signature-Input"],
+          },
+        },
+        {
+          keyid: "test-key",
+          alg: "ecdsa-p256-sha256",
+          verify: () => true,
+        },
+        { transform: () => "verified" }
+      )
+    ).resolves.toBe("verified");
+  });
+
+  it("rejects a claimed algorithm that differs from the provider", async () => {
+    let calls = 0;
+    const now = new Date();
+    await expect(
+      vNext.signatureHeaders(
+        request,
+        {
+          keyid: "test-key",
+          alg: "ecdsa-p256-sha256",
+          sign() {
+            calls += 1;
+            return new Uint8Array([1, 2, 3]);
+          },
+        },
+        {
+          created: now,
+          expires: new Date(now.getTime() + 60_000),
+          alg: "ed25519",
+          components: ["@authority"],
+        }
+      )
+    ).rejects.toThrow(
+      "claimed algorithm ed25519 does not match ecdsa-p256-sha256"
+    );
+    expect(calls).toBe(0);
+  });
+
+  it("rejects a verified claim that differs from the provider", async () => {
+    const now = new Date();
+    const fields = await vNext.signatureHeaders(
+      request,
+      {
+        keyid: "test-key",
+        alg: "ed25519",
+        sign: () => new Uint8Array([1, 2, 3]),
+      },
+      {
+        created: now,
+        expires: new Date(now.getTime() + 60_000),
+        alg: "ed25519",
+        components: ["@authority"],
+      }
+    );
+    let calls = 0;
+    await expect(
+      vNext.verify(
+        {
+          ...request,
+          headers: {
+            ...request.headers,
+            signature: fields.Signature,
+            "signature-input": fields["Signature-Input"],
+          },
+        },
+        {
+          keyid: "test-key",
+          alg: "ecdsa-p256-sha256",
+          verify: () => {
+            calls += 1;
+            return true;
+          },
+        }
+      )
+    ).rejects.toThrow("verifier algorithm does not match");
+    expect(calls).toBe(0);
+  });
+});
+
+describe("replay protection", () => {
+  function signatureAgentComponent(
+    key = "sig1"
+  ): webBotAuth.ComponentIdentifier {
+    return { name: "signature-agent", parameters: [["key", key]] };
+  }
+
+  async function signed(
+    components: ReadonlyArray<webBotAuth.ComponentIdentifier>,
+    headers: Readonly<Record<string, string>> = {}
+  ): Promise<{
+    readonly method: string;
+    readonly url: string;
+    readonly headers: Readonly<Record<string, string>>;
+  }> {
+    const now = new Date();
+    const message = {
+      method: "GET",
+      url: "https://example.com/path",
+      headers,
+    };
+    const fields = await vNext.signatureHeaders(
+      message,
+      {
+        keyid: "test-key",
+        alg: "ed25519",
+        sign: () => new Uint8Array([1, 2, 3]),
+      },
+      {
+        created: now,
+        expires: new Date(now.getTime() + 60_000),
+        components,
+      }
+    );
+    return {
+      ...message,
+      headers: {
+        ...headers,
+        signature: fields.Signature,
+        "signature-input": fields["Signature-Input"],
+      },
+    };
+  }
+
+  const accept: webBotAuth.Verifier = {
+    keyid: "test-key",
+    alg: "ed25519",
+    verify: () => true,
+  };
+
+  it("rejects unsupported synchronous signing algorithms", () => {
+    const now = new Date();
+    expect(() =>
+      Reflect.apply(vNext.signatureHeadersSync, undefined, [
+        request,
+        {
+          keyid: "test-key",
+          alg: "hmac-sha256",
+          signSync: () => new Uint8Array([1, 2, 3]),
+        },
+        {
+          created: now,
+          expires: new Date(now.getTime() + 60_000),
+          components: ["@authority"],
+        },
+      ])
+    ).toThrow("algorithm hmac-sha256 is not allowed by Web Bot Auth");
+  });
+
+  it("binds the claimed keyid to the verifier key", async () => {
+    let calls = 0;
+    await expect(
+      vNext.verify(await signed(["@target-uri"]), {
+        keyid: "different-key",
+        alg: "ed25519",
+        verify: () => {
+          calls += 1;
+          return true;
+        },
+      })
+    ).rejects.toMatchObject({ code: "unknown_key" });
+    expect(calls).toBe(0);
+  });
+
+  it("resolves a trusted verifier from signed metadata", async () => {
+    await expect(
+      vNext.verify(await signed(["@target-uri"]), (params) => ({
+        keyid: params.keyid,
+        alg: "ed25519",
+        verify: () => true,
+      }))
+    ).resolves.toMatchObject({ keyid: "test-key" });
+  });
+
+  it("rejects signatures without authority or target URI", async () => {
+    const valid = await signed(["@target-uri"]);
+    const message = {
+      ...valid,
+      headers: {
+        ...valid.headers,
+        "signature-input": valid.headers["signature-input"].replace(
+          '"@target-uri"',
+          '"@method"'
+        ),
+      },
+    };
+    await expect(vNext.verify(message, accept)).rejects.toThrow(
+      "signature must cover @authority or @target-uri"
+    );
+  });
+
+  it("rejects an uncovered Signature-Agent field", async () => {
+    const signedWithoutAgent = await signed(["@authority"]);
+    await expect(
+      vNext.verify(
+        {
+          ...signedWithoutAgent,
+          headers: {
+            ...signedWithoutAgent.headers,
+            "signature-agent": 'sig1="https://example.com/agent"',
+          },
+        },
+        accept
+      )
+    ).rejects.toThrow(
+      "signature with signature-agent header must cover signature-agent"
+    );
+  });
+
+  it("accepts target and Signature-Agent coverage", async () => {
+    await expect(
+      vNext.verify(
+        await signed(["@target-uri", signatureAgentComponent()], {
+          "signature-agent": 'sig1="https://example.com/agent"',
+        }),
+        (params) => {
+          expect(params.signatureAgentKey).toBe("sig1");
+          return accept;
+        }
+      )
+    ).resolves.toMatchObject({ keyid: "test-key", tag: "web-bot-auth" });
+  });
+
+  it("rejects false verification without running the result transform", async () => {
+    let transforms = 0;
+    await expect(
+      vNext.verify(
+        await signed(["@target-uri"]),
+        { keyid: "test-key", alg: "ed25519", verify: () => false },
+        {
+          transform: () => {
+            transforms += 1;
+            return "verified";
+          },
+        }
+      )
+    ).rejects.toMatchObject({ code: "signature_mismatch" });
+    expect(transforms).toBe(0);
+  });
+
+  it("runs the result transform after true verification", async () => {
+    await expect(
+      vNext.verify(
+        await signed(["@target-uri"]),
+        { keyid: "test-key", alg: "ed25519", verify: () => true },
+        { transform: ({ keyid }) => keyid }
+      )
+    ).resolves.toBe("test-key");
+  });
+
+  it.each(["req", "tr"])(
+    "rejects Signature-Agent coverage from the %s field section",
+    async (section) => {
+      let calls = 0;
+      const valid = await signed(["@target-uri", signatureAgentComponent()], {
+        "signature-agent": 'sig1="https://example.com/agent"',
+      });
+      const message = {
+        ...valid,
+        headers: {
+          ...valid.headers,
+          "signature-input": valid.headers["signature-input"].replace(
+            '"signature-agent";key="sig1"',
+            `"signature-agent";key="sig1";${section}`
+          ),
+        },
+      };
+      await expect(
+        vNext.verify(message, {
+          keyid: "test-key",
+          alg: "ed25519",
+          verify: () => {
+            calls += 1;
+            return true;
+          },
+        })
+      ).rejects.toThrow(
+        "signature-agent coverage must target the message header field section"
+      );
+      expect(calls).toBe(0);
+    }
+  );
+
+  it("rejects Signature-Agent coverage without a dictionary key", async () => {
+    let calls = 0;
+    const valid = await signed(["@target-uri", signatureAgentComponent()], {
+      "signature-agent": 'sig1="https://example.com/agent"',
     });
+    const message = {
+      ...valid,
+      headers: {
+        ...valid.headers,
+        "signature-input": valid.headers["signature-input"].replace(
+          ';key="sig1"',
+          ""
+        ),
+      },
+    };
+    await expect(
+      vNext.verify(message, {
+        keyid: "test-key",
+        alg: "ed25519",
+        verify: () => {
+          calls += 1;
+          return true;
+        },
+      })
+    ).rejects.toThrow("signature-agent coverage must select a dictionary key");
+    expect(calls).toBe(0);
+  });
+
+  it.each([
+    ["uncovered", ["@target-uri"]],
+    ["whole field", ["@target-uri", "signature-agent"]],
+    [
+      "request field section",
+      [
+        "@target-uri",
+        {
+          name: "signature-agent",
+          parameters: [
+            ["key", "sig1"],
+            ["req", true],
+          ],
+        },
+      ],
+    ],
+    ["missing dictionary key", ["@target-uri", "signature-agent"]],
+  ] satisfies ReadonlyArray<
+    readonly [string, ReadonlyArray<webBotAuth.ComponentIdentifier>]
+  >)("rejects %s Signature-Agent signing coverage", async (_, components) => {
+    let calls = 0;
+    const now = new Date();
+    await expect(
+      vNext.signatureHeaders(
+        {
+          method: "GET",
+          url: "https://example.com/path",
+          headers: { "signature-agent": 'sig1="https://example.com/agent"' },
+        },
+        {
+          keyid: "test-key",
+          alg: "ed25519",
+          sign: () => {
+            calls += 1;
+            return new Uint8Array([1, 2, 3]);
+          },
+        },
+        {
+          created: now,
+          expires: new Date(now.getTime() + 60_000),
+          components,
+        }
+      )
+    ).rejects.toThrow(/signature-agent coverage|must cover signature-agent/);
+    expect(calls).toBe(0);
+  });
+
+  it("signs and verifies independent signature and member labels", async () => {
+    const now = new Date();
+    const message = {
+      method: "GET",
+      url: "https://example.com/path",
+      headers: { "signature-agent": 'agent2="https://example.com/agent"' },
+    };
+    const fields = await vNext.signatureHeaders(
+      message,
+      {
+        keyid: "test-key",
+        alg: "ed25519",
+        sign: () => new Uint8Array([1, 2, 3]),
+      },
+      {
+        key: "sig2",
+        created: now,
+        expires: new Date(now.getTime() + 60_000),
+        components: ["@target-uri", signatureAgentComponent("agent2")],
+      }
+    );
+    expect(fields["Signature-Input"]).toContain(
+      'sig2=("@target-uri" "signature-agent";key="agent2")'
+    );
+    await expect(
+      vNext.verify(
+        {
+          ...message,
+          headers: {
+            ...message.headers,
+            signature: fields.Signature,
+            "signature-input": fields["Signature-Input"],
+          },
+        },
+        accept,
+        { label: "sig2" }
+      )
+    ).resolves.toMatchObject({ keyid: "test-key" });
+  });
+
+  it("enumerates signature labels before selection", () => {
+    const created = Math.floor(Date.now() / 1000);
+    const parameters = `;created=${created};expires=${created + 60};keyid="test-key";tag="web-bot-auth"`;
+    const signatures = vNext.getSignatures({
+      method: "GET",
+      url: "https://example.com/path",
+      headers: {
+        "signature-input": `first=("@target-uri")${parameters}, second=("@target-uri")${parameters}`,
+        signature: "first=:AQ==:, second=:Ag==:",
+      },
+    });
+    expect(signatures.map(({ label }) => label)).toEqual(["first", "second"]);
+  });
+
+  it("rejects policy failures before invoking the consumer verifier", async () => {
+    let calls = 0;
+    const valid = await signed(["@target-uri"]);
+    const message = {
+      ...valid,
+      headers: {
+        ...valid.headers,
+        "signature-input": valid.headers["signature-input"].replace(
+          '"@target-uri"',
+          '"@method"'
+        ),
+      },
+    };
+    await expect(
+      vNext.verify(message, {
+        keyid: "test-key",
+        alg: "ed25519",
+        verify: () => {
+          calls += 1;
+          return true;
+        },
+      })
+    ).rejects.toThrow("signature must cover @authority or @target-uri");
+    expect(calls).toBe(0);
+  });
+
+  it("rejects parameter failures before invoking the consumer verifier", async () => {
+    let calls = 0;
+    const valid = await signed(["@target-uri"]);
+    const message = {
+      ...valid,
+      headers: {
+        ...valid.headers,
+        "signature-input": valid.headers["signature-input"].replace(
+          ';tag="web-bot-auth"',
+          ""
+        ),
+      },
+    };
+    await expect(
+      vNext.verify(message, {
+        keyid: "test-key",
+        alg: "ed25519",
+        verify: () => {
+          calls += 1;
+          return true;
+        },
+      })
+    ).rejects.toThrow("tag MUST be defined");
+    expect(calls).toBe(0);
+  });
+
+  it("rejects empty signatures before invoking the consumer verifier", async () => {
+    let calls = 0;
+    const valid = await signed(["@target-uri"]);
+    await expect(
+      vNext.verify(
+        {
+          ...valid,
+          headers: { ...valid.headers, signature: "sig1=::" },
+        },
+        {
+          keyid: "test-key",
+          alg: "ed25519",
+          verify: () => {
+            calls += 1;
+            return true;
+          },
+        }
+      )
+    ).rejects.toThrow("Signature bytes must not be empty");
+    expect(calls).toBe(0);
+  });
+
+  it("authenticates mutations of the target Signature-Agent header", async () => {
+    let signedData = "";
+    const headers = { "signature-agent": 'sig1="https://example.com/agent"' };
+    const now = new Date();
+    const fields = await vNext.signatureHeaders(
+      { method: "GET", url: "https://example.com/path", headers },
+      {
+        keyid: "test-key",
+        alg: "ed25519",
+        sign(data) {
+          signedData = data;
+          return new Uint8Array([1, 2, 3]);
+        },
+      },
+      {
+        created: now,
+        expires: new Date(now.getTime() + 60_000),
+        components: ["@target-uri", signatureAgentComponent()],
+      }
+    );
+    await expect(
+      vNext.verify(
+        {
+          method: "GET",
+          url: "https://example.com/path",
+          headers: {
+            "signature-agent": 'sig1="https://example.com/other"',
+            signature: fields.Signature,
+            "signature-input": fields["Signature-Input"],
+          },
+        },
+        {
+          keyid: "test-key",
+          alg: "ed25519",
+          verify: (data) => {
+            if (data !== signedData) throw new Error("signature mismatch");
+            return true;
+          },
+        }
+      )
+    ).rejects.toThrow("Failed to verify HTTP message signature");
   });
 });

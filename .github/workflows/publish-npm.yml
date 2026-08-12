@@ -24,11 +24,13 @@ jobs:
       - run: npm run build
       - run: npm run test
 
-      - run: npm publish -w http-message-sig --access public
-        continue-on-error: true
-
-      - run: npm publish -w jsonwebkey-thumbprint --access public
-        continue-on-error: true
-
-      - run: npm publish -w web-bot-auth --access public
-        continue-on-error: true
+      - name: Publish packages
+        run: |
+          for package in http-message-sig jsonwebkey-thumbprint web-bot-auth; do
+            version=$(node -p "require('./packages/$package/package.json').version")
+            if published=$(npm view "$package@$version" version 2>/dev/null) && [ "$published" = "$version" ]; then
+              echo "$package@$version is already published"
+            else
+              npm publish -w "$package" --access public
+            fi
+          done

@@ -34,7 +34,7 @@ import { generateDebugHTML } from "./debug-html";
 import { invalidHTML, neutralHTML, validHTML } from "./index-html";
 import { proxyDirectoryRequest } from "./proxy-directory";
 import jwk from "../../rfc9421-keys/ed25519.json" assert { type: "json" };
-import { signerFromJWK, verifier } from "web-bot-auth/crypto";
+import { Ed25519Signer, verifierFromJWK } from "web-bot-auth/crypto";
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
@@ -56,6 +56,7 @@ function jsonWebKeyFromUnknown(value: unknown): JsonWebKey {
 		crv: typeof value.crv === "string" ? value.crv : undefined,
 		d: typeof value.d === "string" ? value.d : undefined,
 		e: typeof value.e === "string" ? value.e : undefined,
+		kid: typeof value.kid === "string" ? value.kid : undefined,
 		kty: value.kty,
 		n: typeof value.n === "string" ? value.n : undefined,
 		x: typeof value.x === "string" ? value.x : undefined,
@@ -164,22 +165,37 @@ async function fetchDirectory(entry: SignatureAgentEntry): Promise<Directory> {
 }
 
 async function getSigner(): Promise<Signer> {
-	return signerFromJWK(jwk);
+	return Ed25519Signer.fromJWK(jwk);
 }
 
-function verifyEd25519(directory: Directory): VerifierFactory {
-	// Awaited inside the factory, which may return a Promise so that key material can be resolved
-	// per signature rather than once up front.
-	return async (signature, context) =>
-		verifier(
-			await crypto.subtle.importKey(
-				"jwk",
-				directory.keys[0],
-				{ name: "Ed25519" },
-				true,
-				["verify"]
-			)
-		)(signature, context);
+function requestVerifier(env: Env, request: Request): VerifierFactory {
+	return async ({ keyid, signatureAgentKey }) => {
+		const signatureAgent = request.headers.get("Signature-Agent");
+		let directory: Directory;
+		if (signatureAgent === null) {
+			directory = await getExampleDirectory();
+		} else {
+			if (signatureAgentKey === undefined) {
+				throw new Error("signature does not cover a Signature-Agent member");
+			}
+			const parsed = parseSignatureAgentHeader(signatureAgent);
+			const entry = parsed.entries.find(
+				({ label }) => label === signatureAgentKey
+			);
+			if (entry === undefined) {
+				throw new Error(
+					`covered Signature-Agent member ${signatureAgentKey} does not exist`
+				);
+			}
+			directory =
+				new URL(entry.uri).origin === new URL(env.SIGNATURE_AGENT).origin
+					? await getExampleDirectory()
+					: await fetchDirectory(entry);
+		}
+		const key = directory.keys.find(({ kid }) => kid === keyid);
+		if (key === undefined) throw new Error(`unknown keyid ${keyid}`);
+		return verifierFromJWK(key);
+	};
 }
 
 const SignatureValidationStatus = {
@@ -198,28 +214,8 @@ async function verifySignature(
 	}
 
 	const signatureAgent = request.headers.get("Signature-Agent");
-	let directory: Directory;
 	try {
-		if (signatureAgent) {
-			const parsed = parseSignatureAgentHeader(signatureAgent);
-			const entry = parsed.entries[0];
-			if (entry === undefined) {
-				throw new Error("Signature-Agent header has no entries");
-			}
-			if (new URL(entry.uri).origin === new URL(env.SIGNATURE_AGENT).origin) {
-				directory = await getExampleDirectory();
-			} else {
-				directory = await fetchDirectory(entry);
-			}
-		} else {
-			directory = await getExampleDirectory();
-		}
-	} catch (e) {
-		return SignatureValidationStatus.INVALID(errorMessage(e));
-	}
-
-	try {
-		await verify(request, verifyEd25519(directory));
+		await verify(request, requestVerifier(env, request));
 	} catch (e) {
 		return SignatureValidationStatus.INVALID(errorMessage(e));
 	}

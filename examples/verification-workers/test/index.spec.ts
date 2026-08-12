@@ -20,7 +20,10 @@ import {
 	SELF,
 } from "cloudflare:test";
 import { afterEach, describe, it, expect, vi } from "vitest";
+import { recommendedComponents, signatureHeaders } from "web-bot-auth";
+import { Ed25519Signer } from "web-bot-auth/crypto";
 import worker from "../src/index";
+import jwk from "../../rfc9421-keys/ed25519.json" assert { type: "json" };
 
 // For now, you'll need to do something like this to get a correctly-typed
 // `Request` to pass to `worker.fetch()`.
@@ -214,6 +217,56 @@ describe("registry draft endpoints", () => {
 		const response = await SELF.fetch(`${sampleURL}/ips.json`);
 
 		expect(response.status).toEqual(200);
+	});
+});
+
+describe("/v0/api/verify endpoint", () => {
+	it("verifies a key fetched from an external directory", async () => {
+		const signer = await Ed25519Signer.fromJWK(jwk);
+		const signatureAgent = "https://agent.example/keys";
+		const request = new IncomingRequest(`${sampleURL}/v0/api/verify`, {
+			headers: {
+				"Signature-Agent": `uncovered="https://uncovered.example";type=directory, sig1="${signatureAgent}";type=directory`,
+			},
+		});
+		const now = new Date();
+		const fields = await signatureHeaders(request, signer, {
+			components: recommendedComponents("sig1"),
+			created: now,
+			expires: new Date(now.getTime() + 60_000),
+		});
+		const headers = new Headers(request.headers);
+		headers.set("Signature", fields.Signature);
+		headers.set("Signature-Input", fields["Signature-Input"]);
+		const fetch = vi.fn(() =>
+			Promise.resolve(
+				Response.json({
+					keys: [
+						{
+							crv: jwk.crv,
+							kid: signer.keyid,
+							kty: jwk.kty,
+							x: jwk.x,
+						},
+					],
+					purpose: "test",
+				})
+			)
+		);
+		vi.stubGlobal("fetch", fetch);
+
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(
+			new IncomingRequest(request, { headers }),
+			env,
+			ctx
+		);
+		await waitOnExecutionContext(ctx);
+
+		expect(await response.text()).toBe("valid");
+		expect(fetch).toHaveBeenCalledWith(
+			"https://agent.example/.well-known/http-message-signatures-directory"
+		);
 	});
 });
 

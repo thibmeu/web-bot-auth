@@ -4,14 +4,14 @@
 ///
 /// It takes one positional argument: [directory] which is where the vectors should be written in JSON
 
+import { createHash } from "node:crypto";
+import * as fs from "node:fs";
+import * as path from "node:path";
+
 const { recommendedComponents, signatureHeaders } =
   await import("../dist/index.mjs");
 
 const { signerFromJWK } = await import("../dist/crypto.mjs");
-
-const crypto = await import("crypto");
-const fs = await import("fs");
-const path = await import("path");
 
 const SIGNATURE_AGENT_HEADER = "https://signature-agent.test";
 const ORIGIN_URL = "https://example.com/path/to/resource";
@@ -25,8 +25,7 @@ const DRAND_RANDOMNESS =
   "4901231f69a4e411e699f96485790415e83c56d1a8ef81acdf1bbdd75f6a2332";
 
 function nonceFor(jwk: JsonWebKey, label: string): string {
-  return crypto
-    .createHash("sha512")
+  return createHash("sha512")
     .update(`${DRAND_ROUND}:${DRAND_RANDOMNESS}:${jwk.kty}:${label}`)
     .digest("base64");
 }
@@ -122,7 +121,7 @@ async function generateTestVectors(jwk: JsonWebKey): Promise<TestVector[]> {
       label: labelWithAgent,
       signature: signedHeadersWithAgent["Signature"],
       signature_input: signedHeadersWithAgent["Signature-Input"],
-      signature_agent: request.headers.get("Signature-Agent"),
+      signature_agent: request.headers.get("Signature-Agent") ?? undefined,
       signature_agent_key: signatureAgentKey,
     },
   ];

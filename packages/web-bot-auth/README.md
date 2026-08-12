@@ -21,6 +21,9 @@ TypeScript helpers for Web Bot Auth, as described in [draft-meunier-webbotauth-h
 - `Signature-Agent`, registry, and Signature Agent Card parsers
 - TypeScript types
 
+Version 0.2 changes the API with multiple-signature, repeated-field,
+trailer, extension-parameter, and key- and algorithm-bound verification support.
+
 ## Usage
 
 This section shows basic signing and verification.
@@ -97,6 +100,24 @@ const signedRequest = new Request("https://example.com", {
 
 await verify(signedRequest, await verifierFromJWK(RFC_9421_ED25519_TEST_KEY));
 ```
+
+### Key selection
+
+Pass a verifier factory when trusted key selection depends on signed metadata.
+Conflicting signed `keyid` and `alg` parameters are rejected before
+cryptographic verification. `signatureAgentKey` identifies the authenticated
+`Signature-Agent` dictionary member; resolve keys from that member rather than
+the first header entry.
+
+```typescript
+const params = await verify(signedRequest, ({ keyid, signatureAgentKey }) =>
+  trustedVerifierFor(signatureAgentKey, keyid)
+);
+```
+
+Use `getSignatures(message)` to enumerate labels before selecting one with the
+`label` verification option. Labels are transport identifiers, not authenticated
+application identities.
 
 ## Security Considerations
 

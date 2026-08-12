@@ -12,7 +12,8 @@
     "build": "npm run build -w http-message-sig -w jsonwebkey-thumbprint -w web-bot-auth",
     "format": "prettier --write . && oxlint examples packages --ignore-pattern **/dist/** --fix",
     "lint": "prettier --check . && oxlint examples packages --ignore-pattern **/dist/**",
-    "test": "npm run test -w http-message-sig -- --run && npm run test -w jsonwebkey-thumbprint -- --run && npm run test -w web-bot-auth -- --run && npm run test -w verification-workers -- --run"
+    "test": "npm run typecheck && npm run test -w http-message-sig -- --run && npm run test -w jsonwebkey-thumbprint -- --run && npm run test -w web-bot-auth -- --run && npm run test -w verification-workers -- --run",
+    "typecheck": "npm run build --silent && npm run typecheck -w http-message-sig -w web-bot-auth"
   },
   "license": "Apache-2.0",
   "version": "0.0.0",

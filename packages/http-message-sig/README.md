@@ -18,16 +18,37 @@ Forked from [ltonetwork/http-message-signatures](https://github.com/ltonetwork/h
 
 ## Features
 
-- HTTP Message Signatures constructions
-- Signing synchoronously and asynchronously
-- Verifying synchronously and asynchronously
+- RFC 9421 request, response, and descriptor operations
+- RFC 9651 Structured Field values
+- Synchronous and asynchronous signing
+- Multiple signature parsing and label selection
 - TypeScript types
 
 ## Usage
 
+The package root provides signing, signature enumeration, and algorithm- and
+key-bound verification without exposing the underlying RFC engine's types.
+It defaults to the strict RFC 9421 Signature-Input profile. Date and
+Display String signature parameters require the explicit
+`signatureInputProfile: "rfc9651-extension"` option. Covered Structured Fields
+use RFC 9651.
+
 ```typescript
-import { sign, verify } from "http-message-sig";
+import { createSignature } from "http-message-sig";
+
+const fields = await createSignature(request, {
+  signer,
+  components: [
+    "@method",
+    { name: "@query-param", parameters: [["name", "page"]] },
+    { name: "example-dictionary", parameters: [["key", "member"]] },
+  ],
+  parameters: [["created", 1_735_689_600]],
+});
 ```
+
+`fetch-message-signatures@0.1.0` provides the RFC parser and canonicalization
+engine.
 
 ## Security Considerations
 
