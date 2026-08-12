@@ -134,6 +134,7 @@ const REGISTERED_PARAMETERS: Readonly<Record<string, BareItem["type"]>> = {
 export function resolveSignatureLimits(
   overrides: Partial<SignatureLimits> = {}
 ): SignatureLimits {
+  if (Object.keys(overrides).length === 0) return DEFAULT_SIGNATURE_LIMITS;
   const result = { ...DEFAULT_SIGNATURE_LIMITS, ...overrides };
   for (const [name, value] of Object.entries(result)) {
     if (!Number.isSafeInteger(value) || value < 1)
@@ -1300,7 +1301,6 @@ export function buildSignatureBase(
 function signatureInputFromMember(
   label: string,
   member: SfDictionaryEntry["value"],
-  profile: SignatureInputProfile,
   accept: boolean,
   configured: SignatureLimits
 ): SignatureInput {
@@ -1325,15 +1325,57 @@ function signatureInputFromMember(
       );
     return { name: value.value, parameters };
   });
-  for (const component of components) validateComponent(component, configured);
-  serializeSignatureParameters(
-    components,
-    member.parameters,
-    profile,
-    accept,
-    configured
-  );
+  validateSignatureParameters(member.parameters, accept);
+  const identities = new Set<string>();
+  for (const component of components) {
+    validateComponent(component, configured);
+    const identity = JSON.stringify([
+      component.name.toLowerCase(),
+      [...component.parameters].sort(({ name: left }, { name: right }) =>
+        left < right ? -1 : left > right ? 1 : 0
+      ),
+    ]);
+    if (identities.has(identity))
+      throw new MessageSignatureError(
+        "duplicate component identifier",
+        "invalid-component"
+      );
+    identities.add(identity);
+  }
   return { label, components, parameters: member.parameters };
+}
+
+function parseSignatureInputFieldWithLimits(
+  source: string,
+  profile: SignatureInputProfile,
+  configured: SignatureLimits,
+  accept: boolean,
+  fieldName: "Signature-Input" | "Accept-Signature"
+): readonly SignatureInput[] {
+  boundedUtf8ByteLength(
+    source,
+    configured.maxSignatureInputBytes,
+    `${fieldName} byte limit exceeded`
+  );
+  const revision = profile === "rfc9421" ? "rfc8941" : "rfc9651";
+  try {
+    const entries = parseDictionary(source, revision, {
+      maxDictionaryMembers: configured.maxSignatures,
+      maxInnerListItems: configured.maxComponentsPerSignature,
+      maxItemParameters: configured.maxComponentParameters,
+      maxMemberParameters: configured.maxParametersPerSignature,
+    });
+    return entries.map(({ key, value }) =>
+      signatureInputFromMember(key, value, accept, configured)
+    );
+  } catch (error) {
+    if (error instanceof MessageSignatureError) throw error;
+    enforceStructuredParseLimit(error);
+    throw new MessageSignatureError(
+      `invalid ${fieldName}: ${error instanceof Error ? error.message : String(error)}`,
+      "invalid-signature-input"
+    );
+  }
 }
 
 export function parseSignatureInputField(
@@ -1341,55 +1383,13 @@ export function parseSignatureInputField(
   profile: SignatureInputProfile = "rfc9421",
   limitOverrides: Partial<SignatureLimits> = {}
 ): readonly SignatureInput[] {
-  const configured = resolveSignatureLimits(limitOverrides);
-  boundedUtf8ByteLength(
+  return parseSignatureInputFieldWithLimits(
     source,
-    configured.maxSignatureInputBytes,
-    "Signature-Input byte limit exceeded"
+    profile,
+    resolveSignatureLimits(limitOverrides),
+    false,
+    "Signature-Input"
   );
-  const revision = profile === "rfc9421" ? "rfc8941" : "rfc9651";
-  try {
-    const entries = parseDictionary(source, revision, {
-      maxDictionaryMembers: configured.maxSignatures,
-      maxInnerListItems: configured.maxComponentsPerSignature,
-      maxItemParameters: configured.maxComponentParameters,
-      maxMemberParameters: configured.maxParametersPerSignature,
-    });
-    if (entries.length > configured.maxSignatures)
-      throw new MessageSignatureError(
-        "signature count limit exceeded",
-        "policy"
-      );
-    return entries.map(({ key, value }) => {
-      if (value.kind === "inner-list") {
-        if (value.items.length > configured.maxComponentsPerSignature)
-          throw new MessageSignatureError("component limit exceeded", "policy");
-        if (value.parameters.length > configured.maxParametersPerSignature)
-          throw new MessageSignatureError(
-            "signature parameter limit exceeded",
-            "policy"
-          );
-        if (
-          value.items.some(
-            ({ parameters }) =>
-              parameters.length > configured.maxComponentParameters
-          )
-        )
-          throw new MessageSignatureError(
-            "component parameter limit exceeded",
-            "policy"
-          );
-      }
-      return signatureInputFromMember(key, value, profile, false, configured);
-    });
-  } catch (error) {
-    if (error instanceof MessageSignatureError) throw error;
-    enforceStructuredParseLimit(error);
-    throw new MessageSignatureError(
-      `invalid Signature-Input: ${error instanceof Error ? error.message : String(error)}`,
-      "invalid-signature-input"
-    );
-  }
 }
 
 export function parseAcceptSignatureField(
@@ -1397,55 +1397,13 @@ export function parseAcceptSignatureField(
   profile: SignatureInputProfile = "rfc9421",
   limitOverrides: Partial<SignatureLimits> = {}
 ): readonly SignatureInput[] {
-  const configured = resolveSignatureLimits(limitOverrides);
-  boundedUtf8ByteLength(
+  return parseSignatureInputFieldWithLimits(
     source,
-    configured.maxSignatureInputBytes,
-    "Accept-Signature byte limit exceeded"
+    profile,
+    resolveSignatureLimits(limitOverrides),
+    true,
+    "Accept-Signature"
   );
-  const revision = profile === "rfc9421" ? "rfc8941" : "rfc9651";
-  try {
-    const entries = parseDictionary(source, revision, {
-      maxDictionaryMembers: configured.maxSignatures,
-      maxInnerListItems: configured.maxComponentsPerSignature,
-      maxItemParameters: configured.maxComponentParameters,
-      maxMemberParameters: configured.maxParametersPerSignature,
-    });
-    if (entries.length > configured.maxSignatures)
-      throw new MessageSignatureError(
-        "signature count limit exceeded",
-        "policy"
-      );
-    return entries.map(({ key, value }) => {
-      if (value.kind === "inner-list") {
-        if (value.items.length > configured.maxComponentsPerSignature)
-          throw new MessageSignatureError("component limit exceeded", "policy");
-        if (value.parameters.length > configured.maxParametersPerSignature)
-          throw new MessageSignatureError(
-            "signature parameter limit exceeded",
-            "policy"
-          );
-        if (
-          value.items.some(
-            ({ parameters }) =>
-              parameters.length > configured.maxComponentParameters
-          )
-        )
-          throw new MessageSignatureError(
-            "component parameter limit exceeded",
-            "policy"
-          );
-      }
-      return signatureInputFromMember(key, value, profile, true, configured);
-    });
-  } catch (error) {
-    if (error instanceof MessageSignatureError) throw error;
-    enforceStructuredParseLimit(error);
-    throw new MessageSignatureError(
-      `invalid Accept-Signature: ${error instanceof Error ? error.message : String(error)}`,
-      "invalid-signature-input"
-    );
-  }
 }
 
 export function listAcceptSignatures(
@@ -1475,11 +1433,10 @@ export function selectAcceptSignature(
   return input;
 }
 
-export function parseSignatureField(
+function parseSignatureFieldWithLimits(
   source: string,
-  limitOverrides: Partial<SignatureLimits> = {}
+  configured: SignatureLimits
 ): readonly ParsedSignature[] {
-  const configured = resolveSignatureLimits(limitOverrides);
   boundedUtf8ByteLength(
     source,
     configured.maxSignatureBytes,
@@ -1490,11 +1447,6 @@ export function parseSignatureField(
       maxDictionaryMembers: configured.maxSignatures,
       maxMemberParameters: 0,
     });
-    if (entries.length > configured.maxSignatures)
-      throw new MessageSignatureError(
-        "signature count limit exceeded",
-        "policy"
-      );
     return entries.map(({ key, value }) => {
       if (
         value.kind !== "item" ||
@@ -1517,23 +1469,35 @@ export function parseSignatureField(
   }
 }
 
+export function parseSignatureField(
+  source: string,
+  limitOverrides: Partial<SignatureLimits> = {}
+): readonly ParsedSignature[] {
+  return parseSignatureFieldWithLimits(
+    source,
+    resolveSignatureLimits(limitOverrides)
+  );
+}
+
 export function parseSignatureFields(
   fields: SignatureFields,
   profile: SignatureInputProfile = "rfc9421",
   limitOverrides: Partial<SignatureLimits> = {}
 ): ParsedSignatureSet {
+  const configured = resolveSignatureLimits(limitOverrides);
   const inputs = new Map(
-    parseSignatureInputField(
+    parseSignatureInputFieldWithLimits(
       fields.signatureInput,
       profile,
-      limitOverrides
+      configured,
+      false,
+      "Signature-Input"
     ).map((input) => [input.label, input])
   );
   const signatures = new Map(
-    parseSignatureField(fields.signature, limitOverrides).map((signature) => [
-      signature.label,
-      signature.bytes,
-    ])
+    parseSignatureFieldWithLimits(fields.signature, configured).map(
+      (signature) => [signature.label, signature.bytes]
+    )
   );
   if (inputs.size === 0 || signatures.size === 0)
     throw new MessageSignatureError(
@@ -1764,24 +1728,28 @@ function copyBareItem(value: BareItem): BareItem {
   return Object.freeze({ ...value });
 }
 
+export function snapshotSignatureParameters(
+  parameters: readonly SfParameter[]
+): readonly SfParameter[] {
+  return Object.freeze(
+    parameters.map(({ name, value }) =>
+      Object.freeze({ name, value: copyBareItem(value) })
+    )
+  );
+}
+
 function immutableInput(input: SignatureInput): SignatureInput {
   const components = input.components.map((component) =>
     Object.freeze({
       name: component.name,
-      parameters: Object.freeze(
-        component.parameters.map(({ name, value }) =>
-          Object.freeze({ name, value: copyBareItem(value) })
-        )
-      ),
+      parameters: snapshotSignatureParameters(component.parameters),
     })
   );
-  const parameters = input.parameters.map(({ name, value }) =>
-    Object.freeze({ name, value: copyBareItem(value) })
-  );
+  const parameters = snapshotSignatureParameters(input.parameters);
   return Object.freeze({
     label: input.label,
     components: Object.freeze(components),
-    parameters: Object.freeze(parameters),
+    parameters,
   });
 }
 
@@ -1872,36 +1840,29 @@ export function snapshotMessage(
   });
 }
 
-function algorithmParameter(input: SignatureInput): Algorithm | undefined {
-  const value = input.parameters.find(({ name }) => name === "alg")?.value;
-  if (value === undefined) return undefined;
-  if (value.type !== "string")
-    throw new MessageSignatureError("alg parameter must be string", "policy");
-  if (
-    ![
-      "rsa-pss-sha512",
-      "rsa-v1_5-sha256",
-      "hmac-sha256",
-      "ecdsa-p256-sha256",
-      "ecdsa-p384-sha384",
-      "ed25519",
-    ].includes(value.value)
-  )
-    throw new MessageSignatureError(
-      `unsupported algorithm ${value.value}`,
-      "policy"
-    );
-  switch (value.value) {
+export function signatureAlgorithm(value: string): Algorithm {
+  switch (value) {
     case "rsa-pss-sha512":
     case "rsa-v1_5-sha256":
     case "hmac-sha256":
     case "ecdsa-p256-sha256":
     case "ecdsa-p384-sha384":
     case "ed25519":
-      return value.value;
+      return value;
     default:
-      throw new MessageSignatureError("unsupported algorithm", "policy");
+      throw new MessageSignatureError(
+        `unsupported algorithm ${value}`,
+        "policy"
+      );
   }
+}
+
+function algorithmParameter(input: SignatureInput): Algorithm | undefined {
+  const value = input.parameters.find(({ name }) => name === "alg")?.value;
+  if (value === undefined) return undefined;
+  if (value.type !== "string")
+    throw new MessageSignatureError("alg parameter must be string", "policy");
+  return signatureAlgorithm(value.value);
 }
 
 export async function signMessage(

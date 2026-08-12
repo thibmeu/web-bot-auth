@@ -47,9 +47,12 @@ function isTaggable(
 
 function addParameters(
   target: Parameters,
-  values: Readonly<Record<string, unknown>>
+  values: Readonly<Record<string, unknown>>,
+  excluded: ReadonlySet<string> = new Set()
 ): void {
-  for (const [name, value] of Object.entries(values)) {
+  for (const name of Object.keys(values)) {
+    if (excluded.has(name)) continue;
+    const value = values[name];
     if (value === undefined) continue;
     if (
       typeof value === "string" ||
@@ -100,35 +103,46 @@ function signatureInputField(
   return field;
 }
 
-export async function signatureHeaders<
-  T extends RequestLike | ResponseLike | ResponseRequestPair,
->(message: T, opts: SignOptions): Promise<SignatureHeaders> {
-  validateMessageRequestTarget(message, opts.limits);
-  const {
-    signer,
-    components: _components,
-    key: _key,
-    parameters: orderedParameters,
-    signatureInputProfile = "rfc9421",
-    limits,
-    ...params
-  } = opts;
-  const configured = resolveSignatureLimits(limits);
+interface PreparedSignature {
+  readonly configured: SignatureLimits;
+  readonly key: string;
+  readonly serializedSignatureInput: string;
+  readonly dataToSign: string;
+}
 
+const SIGN_OPTION_NAMES = new Set([
+  "signer",
+  "components",
+  "key",
+  "parameters",
+  "signatureInputProfile",
+  "limits",
+]);
+
+function prepareSignature(
+  message: RequestLike | ResponseLike | ResponseRequestPair,
+  opts: SignOptions | SignSyncOptions,
+  signer: SignOptions["signer"] | SignSyncOptions["signer"]
+): PreparedSignature {
+  validateMessageRequestTarget(message, opts.limits);
+  const requestedComponents = opts.components;
+  const requestedKey = opts.key;
+  const orderedParameters = opts.parameters;
+  const signatureInputProfile = opts.signatureInputProfile ?? "rfc9421";
+  const limits = opts.limits;
+  const configured = resolveSignatureLimits(limits);
   const components =
-    _components ??
+    requestedComponents ??
     ("status" in resolveMessageKind(message)
       ? defaultResponseComponents
       : defaultRequestComponents);
-  const key = _key ?? "sig1";
-
+  const key = requestedKey ?? "sig1";
   const signParams: Parameters = {
     created: new Date(),
     keyid: signer.keyid,
     alg: signer.alg,
   };
-  addParameters(signParams, params);
-
+  addParameters(signParams, opts, SIGN_OPTION_NAMES);
   const signatureInputString = buildSignatureInputString(
     components,
     signParams,
@@ -136,80 +150,45 @@ export async function signatureHeaders<
     signatureInputProfile === "rfc9421" ? "rfc8941" : "rfc9651",
     limits
   );
-  const serializedSignatureInput = signatureInputField(
+  return {
+    configured,
     key,
-    signatureInputString,
-    configured
-  );
-  const dataToSign = buildSignedData(
-    message,
-    components,
-    signatureInputString,
-    limits
-  );
+    serializedSignatureInput: signatureInputField(
+      key,
+      signatureInputString,
+      configured
+    ),
+    dataToSign: buildSignedData(
+      message,
+      components,
+      signatureInputString,
+      limits
+    ),
+  };
+}
 
-  const signature = await signer.sign(dataToSign);
-  const serializedSignature = signatureField(key, signature, configured);
+export async function signatureHeaders<
+  T extends RequestLike | ResponseLike | ResponseRequestPair,
+>(message: T, opts: SignOptions): Promise<SignatureHeaders> {
+  const signer = opts.signer;
+  const prepared = prepareSignature(message, opts, signer);
+  const signature = await signer.sign(prepared.dataToSign);
 
   return {
-    Signature: serializedSignature,
-    "Signature-Input": serializedSignatureInput,
+    Signature: signatureField(prepared.key, signature, prepared.configured),
+    "Signature-Input": prepared.serializedSignatureInput,
   };
 }
 
 export function signatureHeadersSync<
   T extends RequestLike | ResponseLike | ResponseRequestPair,
 >(message: T, opts: SignSyncOptions): SignatureHeaders {
-  validateMessageRequestTarget(message, opts.limits);
-  const {
-    signer,
-    components: _components,
-    key: _key,
-    parameters: orderedParameters,
-    signatureInputProfile = "rfc9421",
-    limits,
-    ...params
-  } = opts;
-  const configured = resolveSignatureLimits(limits);
-
-  const components =
-    _components ??
-    ("status" in resolveMessageKind(message)
-      ? defaultResponseComponents
-      : defaultRequestComponents);
-  const key = _key ?? "sig1";
-
-  const signParams: Parameters = {
-    created: new Date(),
-    keyid: signer.keyid,
-    alg: signer.alg,
-  };
-  addParameters(signParams, params);
-
-  const signatureInputString = buildSignatureInputString(
-    components,
-    signParams,
-    orderedParameters,
-    signatureInputProfile === "rfc9421" ? "rfc8941" : "rfc9651",
-    limits
-  );
-  const serializedSignatureInput = signatureInputField(
-    key,
-    signatureInputString,
-    configured
-  );
-  const dataToSign = buildSignedData(
-    message,
-    components,
-    signatureInputString,
-    limits
-  );
-
-  const signature = signer.signSync(dataToSign);
-  const serializedSignature = signatureField(key, signature, configured);
+  const signer = opts.signer;
+  const prepared = prepareSignature(message, opts, signer);
+  const signature = signer.signSync(prepared.dataToSign);
 
   return {
-    Signature: serializedSignature,
-    "Signature-Input": serializedSignatureInput,
+    Signature: signatureField(prepared.key, signature, prepared.configured),
+    "Signature-Input": prepared.serializedSignatureInput,
   };
 }

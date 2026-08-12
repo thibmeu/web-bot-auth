@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { signatureHeaders, Signer, RequestLike, ResponseLike } from "../src";
+import {
+  signatureHeaders,
+  Signer,
+  RequestLike,
+  ResponseLike,
+  SignOptions,
+} from "../src";
 import { encode as base64Encode } from "../src/base64";
 
 const sampleRequest: RequestLike = {
@@ -99,6 +105,34 @@ describe("sign", () => {
           limits: { maxSignatureBytes: 8 },
         })
       ).rejects.toThrow("Signature field byte limit");
+    });
+
+    it("snapshots a signer getter before preparing metadata", async () => {
+      let reads = 0;
+      const first: Signer = {
+        keyid: "first",
+        alg: "hmac-sha256",
+        sign: () => new Uint8Array([1]),
+      };
+      const second: Signer = {
+        keyid: "second",
+        alg: "ed25519",
+        sign: () => new Uint8Array([2]),
+      };
+      const options: SignOptions = {
+        components: ["@method"],
+        created,
+        get signer() {
+          reads += 1;
+          return reads === 1 ? first : second;
+        },
+      };
+
+      const fields = await signatureHeaders(sampleRequest, options);
+
+      expect(reads).toBe(1);
+      expect(fields["Signature-Input"]).toContain('keyid="first"');
+      expect(fields.Signature).toBe("sig1=:AQ==:");
     });
 
     it("should apply default components", async () => {

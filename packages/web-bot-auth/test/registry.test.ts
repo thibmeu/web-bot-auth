@@ -37,6 +37,23 @@ describe("Signature-Agent invalid syntax", () => {
       }
     );
   });
+
+  it("accepts RFC 9651 extension parameters", () => {
+    expect(
+      parseSignatureAgentHeader(
+        'sig1="https://signature-agent.test";note=%"caf%c3%a9"'
+      )
+    ).toEqual({
+      kind: "current",
+      entries: [
+        {
+          label: "sig1",
+          uri: "https://signature-agent.test",
+          type: "directory",
+        },
+      ],
+    });
+  });
 });
 
 describe.each(registryVectors)("registry $name", (vector) => {

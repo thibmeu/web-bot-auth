@@ -235,20 +235,6 @@ export type Verify<T> = {
   readonly alg: httpsig.Algorithm;
 };
 
-function verificationAlgorithm(value: string): httpsig.Algorithm {
-  switch (value) {
-    case "rsa-pss-sha512":
-    case "rsa-v1_5-sha256":
-    case "hmac-sha256":
-    case "ecdsa-p256-sha256":
-    case "ecdsa-p384-sha384":
-    case "ed25519":
-      return value;
-    default:
-      throw new Error(`unsupported signature algorithm: ${value}`);
-  }
-}
-
 interface SnapshotPlan {
   readonly headers: Set<string>;
   readonly trailers: Set<string>;
@@ -502,22 +488,6 @@ function verificationSnapshot(
   };
 }
 
-function immutableCustomParameters(
-  parameters: readonly httpsig.SfParameter[]
-): readonly httpsig.SfParameter[] {
-  return Object.freeze(
-    parameters.map(({ name, value }) =>
-      Object.freeze({
-        name,
-        value:
-          value.type === "bytes"
-            ? Object.freeze({ type: "bytes", value: value.value.slice() })
-            : Object.freeze({ ...value }),
-      })
-    )
-  );
-}
-
 export async function verify<T>(
   message:
     httpsig.RequestLike | httpsig.ResponseLike | httpsig.ResponseRequestPair,
@@ -531,7 +501,7 @@ export async function verify<T>(
   );
   const signatureAgent = snapshot.signatureAgent;
   const parsedInput = snapshot.input;
-  const customParameters = immutableCustomParameters(
+  const customParameters = httpsig.snapshotSignatureParameters(
     parsedInput.parameters.filter(({ name }) => !RESERVED_PARAMETERS.has(name))
   );
   for (const required of policy.requiredCustomParameters ?? []) {
@@ -551,7 +521,7 @@ export async function verify<T>(
     if (params.alg === undefined) {
       throw new Error("alg MUST be defined");
     }
-    const alg = verificationAlgorithm(params.alg);
+    const alg = httpsig.signatureAlgorithm(params.alg);
     if (alg !== verifier.alg) {
       throw new Error(
         `Signature algorithm ${alg} does not match verifier algorithm ${verifier.alg}`

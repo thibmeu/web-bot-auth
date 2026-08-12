@@ -13,19 +13,16 @@ import {
   normalizeFieldBytes,
   normalizeFieldValue,
   resolveSignatureLimits,
+  serializeComponentIdentifier,
+  serializeSignatureParams,
   utf8ByteLength,
   validateRequestTarget,
   type SignatureLimits,
 } from "./rfc9421";
 import {
-  isInnerList,
-  parseDictionary,
-  serializeInnerList,
-  serializeItem,
-} from "structured-headers";
-import {
   type BareItem,
-  serializeParameters,
+  parseDictionary,
+  serializeMember,
   type SfParameter,
   type StructuredFieldRevision,
 } from "./structured-fields";
@@ -145,15 +142,16 @@ function extractStructuredFieldDictionaryHeaderWithBudget(
     : extractHeaderWithBudget(r, component.header, budget);
   if (!headerValue) return headerValue;
 
-  const dictionary = parseDictionary(headerValue);
-  const item = dictionary.get(component.key);
-  if (!item) {
+  const entry = parseDictionary(headerValue, "rfc8941").find(
+    ({ key }) => key === component.key
+  );
+  if (entry === undefined) {
     throw new Error(
       `Header ${component.header} does not contain dictionary key ${component.key}`
     );
   }
 
-  return isInnerList(item) ? serializeInnerList(item) : serializeItem(item);
+  return serializeMember(entry.value, "rfc8941");
 }
 
 export function extractHeader(
@@ -318,16 +316,46 @@ function structuredFieldComponentParameters(
 }
 
 export function serializeComponent(cwp: Component): string {
+  return serializeComponentIdentifier(legacyCoveredComponent(cwp));
+}
+
+function legacyCoveredComponent(cwp: Component): {
+  readonly name: string;
+  readonly parameters: readonly SfParameter[];
+} {
   if (typeof cwp === "string") {
-    return `"${cwp.toLowerCase()}"`;
+    return { name: cwp, parameters: [] };
   }
 
   if (isStructuredFieldDictionaryComponent(cwp)) {
-    const parameters = structuredFieldComponentParameters(cwp);
-    return serializeItem(`${cwp.header.toLowerCase()}`, parameters);
+    return {
+      name: cwp.header,
+      parameters: legacyComponentParameters(
+        structuredFieldComponentParameters(cwp)
+      ),
+    };
   }
 
-  return serializeItem(`${cwp.name.toLowerCase()}`, cwp.parameters);
+  return {
+    name: cwp.name,
+    parameters: legacyComponentParameters(cwp.parameters),
+  };
+}
+
+function legacyComponentParameters(
+  parameters: ComponentParameters
+): readonly SfParameter[] {
+  const converted: SfParameter[] = [];
+  for (const [parameterName, value] of parameters) {
+    converted.push({
+      name: parameterName,
+      value:
+        typeof value === "boolean"
+          ? { type: "boolean", value }
+          : { type: "string", value },
+    });
+  }
+  return converted;
 }
 
 export function isRawMessage(
@@ -405,14 +433,6 @@ export function buildSignatureInputString(
   limitOverrides: Partial<SignatureLimits> = {}
 ): string {
   const configured = resolveSignatureLimits(limitOverrides);
-  const declaredComponentCount = componentNames.length;
-  if (
-    !Number.isSafeInteger(declaredComponentCount) ||
-    declaredComponentCount < 0 ||
-    (declaredComponentCount === 0 ? 0 : declaredComponentCount - 1) >
-      configured.maxSignatureInputBytes
-  )
-    throw new Error("Signature-Input byte limit exceeded");
   const stableComponents = copyDense(
     componentNames,
     configured.maxComponentsPerSignature,
@@ -424,19 +444,6 @@ export function buildSignatureInputString(
     "signature parameter limit exceeded"
   );
   const legacyParameterEntries = Object.entries(parameters);
-  if (
-    legacyParameterEntries.length + stableOrderedParameters.length >
-    configured.maxParametersPerSignature
-  )
-    throw new Error("signature parameter limit exceeded");
-  for (const component of stableComponents) {
-    if (
-      typeof component !== "string" &&
-      (component.parameters?.size ?? 0) > configured.maxComponentParameters
-    )
-      throw new Error("component parameter limit exceeded");
-  }
-  const components = stableComponents.map(serializeComponent).join(" ");
   const existing = new Set(Object.keys(parameters));
   const custom = new Set<string>();
   for (const { name } of stableOrderedParameters) {
@@ -466,13 +473,12 @@ export function buildSignatureInputString(
     return { name, value: item };
   });
 
-  const output = `(${components})${serializeParameters(legacyParameters, revision)}${serializeParameters(stableOrderedParameters, revision)}`;
-  if (
-    output.length > configured.maxSignatureInputBytes ||
-    utf8ByteLength(output) > configured.maxSignatureInputBytes
-  )
-    throw new Error("Signature-Input byte limit exceeded");
-  return output;
+  return serializeSignatureParams(
+    stableComponents.map(legacyCoveredComponent),
+    [...legacyParameters, ...stableOrderedParameters],
+    revision === "rfc8941" ? "rfc9421" : "rfc9651-extension",
+    limitOverrides
+  );
 }
 
 export function buildSignedData(

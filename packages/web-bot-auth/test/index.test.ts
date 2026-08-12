@@ -266,7 +266,7 @@ describe("verifier algorithm metadata", () => {
     );
 
     expect(() => verifier(keyPair.publicKey)).toThrow(
-      "Unsupported RSA-PSS hash algorithm: SHA-256"
+      "key is inconsistent with supported algorithms"
     );
   });
 });

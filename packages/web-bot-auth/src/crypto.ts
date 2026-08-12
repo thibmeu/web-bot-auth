@@ -1,4 +1,10 @@
-import { type Algorithm, type Signer } from "http-message-sig";
+import {
+  type Algorithm,
+  type Signer,
+  webCryptoKeyAlgorithm,
+  webCryptoSigningProvider,
+  webCryptoVerificationProvider,
+} from "http-message-sig";
 import { jwkThumbprint as jwkToKeyID } from "jsonwebkey-thumbprint";
 import { b64ToB64NoPadding, b64ToB64URL, u8ToB64 } from "./base64";
 import type { VerificationParams, Verify } from "./index";
@@ -12,11 +18,11 @@ export const helpers = {
 export class Ed25519Signer implements Signer {
   public alg: Algorithm = "ed25519";
   public keyid: string;
-  private privateKey: CryptoKey;
+  private readonly provider: ReturnType<typeof webCryptoSigningProvider>;
 
   constructor(keyid: string, privateKey: CryptoKey) {
     this.keyid = keyid;
-    this.privateKey = privateKey;
+    this.provider = webCryptoSigningProvider(this.alg, privateKey);
   }
 
   static async fromJWK(jwk: JsonWebKey): Promise<Ed25519Signer> {
@@ -36,24 +42,18 @@ export class Ed25519Signer implements Signer {
   }
 
   async sign(data: string): Promise<Uint8Array> {
-    const message = new TextEncoder().encode(data);
-    const signature = await crypto.subtle.sign(
-      "ed25519",
-      this.privateKey,
-      message
-    );
-    return new Uint8Array(signature);
+    return this.provider.sign(new TextEncoder().encode(data));
   }
 }
 
 export class RSAPSSSHA512Signer implements Signer {
   public alg: Algorithm = "rsa-pss-sha512";
   public keyid: string;
-  private privateKey: CryptoKey;
+  private readonly provider: ReturnType<typeof webCryptoSigningProvider>;
 
   constructor(keyid: string, privateKey: CryptoKey) {
     this.keyid = keyid;
-    this.privateKey = privateKey;
+    this.provider = webCryptoSigningProvider(this.alg, privateKey);
   }
 
   static async fromJWK(jwk: JsonWebKey): Promise<RSAPSSSHA512Signer> {
@@ -74,13 +74,7 @@ export class RSAPSSSHA512Signer implements Signer {
   }
 
   async sign(data: string): Promise<Uint8Array> {
-    const message = new TextEncoder().encode(data);
-    const signature = await crypto.subtle.sign(
-      { name: "RSA-PSS", saltLength: 64 },
-      this.privateKey,
-      message
-    );
-    return new Uint8Array(signature);
+    return this.provider.sign(new TextEncoder().encode(data));
   }
 }
 
@@ -104,61 +98,18 @@ export function signerFromJWK(jwk: JsonWebKey): Promise<Signer> {
   }
 }
 
-function verifierAlgorithm(key: CryptoKey): Algorithm {
-  switch (key.algorithm.name) {
-    case "Ed25519":
-      return "ed25519";
-    case "RSA-PSS": {
-      if (!("hash" in key.algorithm)) {
-        throw new Error("RSA-PSS key does not declare a hash algorithm");
-      }
-      const hash = key.algorithm.hash;
-      const hashName =
-        typeof hash === "string"
-          ? hash
-          : hash !== null &&
-              typeof hash === "object" &&
-              "name" in hash &&
-              typeof hash.name === "string"
-            ? hash.name
-            : undefined;
-      if (hashName !== "SHA-512") {
-        throw new Error(`Unsupported RSA-PSS hash algorithm: ${hashName}`);
-      }
-      return "rsa-pss-sha512";
-    }
-    default:
-      throw new Error(`Unsupported algorithm: ${key.algorithm.name}`);
-  }
-}
-
 export function verifier(key: CryptoKey): Verify<void> {
-  const alg = verifierAlgorithm(key);
+  const alg = webCryptoKeyAlgorithm(key, ["ed25519", "rsa-pss-sha512"]);
+  const provider = webCryptoVerificationProvider(alg, key);
   const verifySignature = async (
     data: string,
     signature: Uint8Array,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     params: VerificationParams
   ) => {
-    const encodedData = new TextEncoder().encode(data);
-
-    let cryptoParams: Parameters<typeof crypto.subtle.verify>[0];
-    switch (key.algorithm.name) {
-      case "Ed25519":
-        cryptoParams = { name: "Ed25519" };
-        break;
-      case "RSA-PSS":
-        cryptoParams = { name: "RSA-PSS", saltLength: 64 };
-        break;
-      default:
-        throw new Error(`Unsupported algorithm: ${key.algorithm.name}`);
-    }
-
-    const isValid = await crypto.subtle.verify(
-      cryptoParams,
-      key,
-      Uint8Array.from(signature),
-      encodedData
+    const isValid = await provider.verify(
+      new TextEncoder().encode(data),
+      signature
     );
 
     if (!isValid) {

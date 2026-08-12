@@ -71,6 +71,23 @@ function keyMatches(key: CryptoKey, algorithm: Algorithm): boolean {
   }
 }
 
+export function webCryptoKeyAlgorithm(
+  key: CryptoKey,
+  allowed: readonly Algorithm[] = [
+    "rsa-pss-sha512",
+    "rsa-v1_5-sha256",
+    "hmac-sha256",
+    "ecdsa-p256-sha256",
+    "ecdsa-p384-sha384",
+    "ed25519",
+  ]
+): Algorithm {
+  const algorithm = allowed.find((candidate) => keyMatches(key, candidate));
+  if (algorithm === undefined)
+    throw new Error("key is inconsistent with supported algorithms");
+  return algorithm;
+}
+
 export function webCryptoProvider(
   algorithm: Algorithm,
   signingKey: CryptoKey,

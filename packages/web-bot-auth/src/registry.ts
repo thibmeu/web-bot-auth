@@ -1,4 +1,4 @@
-import { parseDictionary, parseItem } from "structured-headers";
+import { parseDictionary, parseItem, type BareItem } from "http-message-sig";
 
 export type SignatureAgentDiscoveryType = "directory" | "jwks_uri" | "cimd";
 
@@ -133,8 +133,17 @@ function triggerValue(value: unknown): "fetcher" | "crawler" | undefined {
   throw new Error("trigger must be fetcher or crawler");
 }
 
-function discoveryType(value: unknown): SignatureAgentDiscoveryType {
-  const typeName = value === undefined ? "directory" : String(value);
+function discoveryType(
+  value: BareItem | undefined
+): SignatureAgentDiscoveryType {
+  const typeName =
+    value === undefined
+      ? "directory"
+      : value.type === "token" || value.type === "string"
+        ? value.value
+        : undefined;
+  if (typeName === undefined)
+    throw new Error("Signature-Agent type must be a token or string");
   if (typeName === "directory") {
     return "directory";
   }
@@ -161,29 +170,32 @@ export function parseSignatureAgentHeader(
   header: string
 ): SignatureAgentHeader {
   try {
-    const dictionary = parseDictionary(header);
-    if (dictionary.size === 0) {
+    const dictionary = parseDictionary(header, "rfc9651");
+    if (dictionary.length === 0) {
       throw new Error("Signature-Agent header must not be empty");
     }
     const entries: SignatureAgentEntry[] = [];
-    for (const [label, value] of dictionary) {
-      const [uri, params] = value;
-      if (typeof uri !== "string") {
+    for (const { key: label, value } of dictionary) {
+      if (value.kind !== "item" || value.value.type !== "string") {
         throw new Error("Signature-Agent values must be strings");
       }
-      const type = discoveryType(params.get("type"));
+      const uri = value.value.value;
+      const type = discoveryType(
+        value.parameters.find(({ name }) => name === "type")?.value
+      );
       validateDiscoveryURI(uri, type);
       entries.push({ label, uri, type });
     }
     return { kind: "current", entries };
   } catch (dictionaryError) {
     try {
-      const [uri] = parseItem(header);
-      if (typeof uri !== "string") {
+      const item = parseItem(header, "rfc9651");
+      if (item.value.type !== "string") {
         throw new Error("legacy Signature-Agent must be a string", {
           cause: dictionaryError,
         });
       }
+      const uri = item.value.value;
       validateDiscoveryURI(uri, "directory");
       return {
         kind: "legacy",

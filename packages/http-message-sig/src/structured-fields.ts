@@ -433,7 +433,9 @@ export class StructuredFieldParser {
   private bytes(): Uint8Array {
     this.expect(":");
     const start = this.offset;
-    while (this.peek() !== undefined && this.peek() !== ":") this.offset += 1;
+    const end = this.source.indexOf(":", start);
+    if (end < 0) this.fail("invalid byte sequence");
+    this.offset = end;
     const encoded = this.source.slice(start, this.offset);
     this.expect(":");
     if (
@@ -448,8 +450,20 @@ export class StructuredFieldParser {
     } catch {
       this.fail("invalid byte sequence");
     }
-    if (btoa(binary) !== encoded) this.fail("non-canonical byte sequence");
-    return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    const alphabet =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    if (
+      (encoded.endsWith("==") &&
+        (alphabet.indexOf(encoded.charAt(encoded.length - 3)) & 0x0f) !== 0) ||
+      (encoded.endsWith("=") &&
+        !encoded.endsWith("==") &&
+        (alphabet.indexOf(encoded.charAt(encoded.length - 2)) & 0x03) !== 0)
+    )
+      this.fail("non-canonical byte sequence");
+    const result = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1)
+      result[index] = binary.charCodeAt(index);
+    return result;
   }
 
   private boolean(): boolean {
