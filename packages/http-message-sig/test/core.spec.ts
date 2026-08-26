@@ -400,6 +400,221 @@ describe("createSignature", () => {
     expect(base).toContain('"example-dict";key="b": ("x" 2);p');
   });
 
+  it("strictly serializes known Structured Field types", async () => {
+    let base = "";
+    await createSignature(
+      {
+        ...request,
+        fields: [
+          ...request.fields,
+          {
+            name: "example-dict",
+            value: "a=1",
+            structuredType: "dictionary",
+          },
+          {
+            name: "example-dict",
+            value: "b=2;x=1, c=(a   b)",
+            structuredType: "dictionary",
+          },
+          { name: "example-list", value: "a", structuredType: "list" },
+          {
+            name: "example-list",
+            value: '  "b";q=1',
+            structuredType: "list",
+          },
+          { name: "example-item", value: "42; x", structuredType: "item" },
+        ],
+      },
+      {
+        components: [
+          component("example-dict", { sf: true }),
+          component("example-list", { sf: true }),
+          component("example-item", { sf: true }),
+        ],
+        parameters: {},
+        signer: {
+          algorithm: "test-alg",
+          sign(data) {
+            base = new TextDecoder().decode(data);
+            return new Uint8Array();
+          },
+        },
+      }
+    );
+    expect(base).toContain('"example-dict";sf: a=1, b=2;x=1, c=(a b)');
+    expect(base).toContain('"example-list";sf: a, "b";q=1');
+    expect(base).toContain('"example-item";sf: 42;x');
+  });
+
+  it("uses Structured Field duplicate last-value semantics", async () => {
+    let base = "";
+    await createSignature(
+      {
+        ...request,
+        fields: [
+          ...request.fields,
+          {
+            name: "duplicate-dict",
+            value: "a=1, a=2",
+            structuredType: "dictionary",
+          },
+          {
+            name: "duplicate-item",
+            value: "42;x=1;x=2",
+            structuredType: "item",
+          },
+        ],
+      },
+      {
+        components: [
+          component("duplicate-dict", { sf: true }),
+          component("duplicate-item", { sf: true }),
+        ],
+        parameters: {},
+        signer: {
+          algorithm: "test-alg",
+          sign(data) {
+            base = new TextDecoder().decode(data);
+            return new Uint8Array();
+          },
+        },
+      }
+    );
+    expect(base).toContain('"duplicate-dict";sf: a=2');
+    expect(base).toContain('"duplicate-item";sf: 42;x=2');
+  });
+
+  it("binary-wraps individual raw field occurrences", async () => {
+    let base = "";
+    await createSignature(
+      {
+        ...request,
+        fields: [
+          ...request.fields,
+          {
+            name: "example-header",
+            value: new TextEncoder().encode(" value, with, lots "),
+          },
+          {
+            name: "example-header",
+            value: new TextEncoder().encode("of, commas"),
+          },
+        ],
+      },
+      {
+        components: [component("example-header", { bs: true })],
+        parameters: {},
+        signer: {
+          algorithm: "test-alg",
+          sign(data) {
+            base = new TextDecoder().decode(data);
+            return new Uint8Array();
+          },
+        },
+      }
+    );
+    expect(base).toContain(
+      '"example-header";bs: :dmFsdWUsIHdpdGgsIGxvdHM=:, :b2YsIGNvbW1hcw==:'
+    );
+  });
+
+  it("selects trailers independently from header fields", async () => {
+    let base = "";
+    await createSignature(
+      {
+        ...request,
+        fields: [...request.fields, { name: "expires", value: "header" }],
+        trailers: [{ name: "expires", value: "trailer" }],
+      },
+      {
+        components: ["expires", component("expires", { tr: true })],
+        parameters: {},
+        signer: {
+          algorithm: "test-alg",
+          sign(data) {
+            base = new TextDecoder().decode(data);
+            return new Uint8Array();
+          },
+        },
+      }
+    );
+    expect(base).toContain('"expires": header');
+    expect(base).toContain('"expires";tr: trailer');
+  });
+
+  it("canonicalizes form query parameters", async () => {
+    let base = "";
+    await createSignature(
+      {
+        ...request,
+        targetUri:
+          "https://example.com/path?param=value&bar=with+plus+whitespace&fa%C3%A7ade%22%3A+=something&qux=",
+      },
+      {
+        components: [
+          component("@query-param", { name: "bar" }),
+          component("@query-param", { name: "fa%C3%A7ade%22%3A%20" }),
+          component("@query-param", { name: "qux" }),
+        ],
+        parameters: {},
+        signer: {
+          algorithm: "test-alg",
+          sign(data) {
+            base = new TextDecoder().decode(data);
+            return new Uint8Array();
+          },
+        },
+      }
+    );
+    expect(base).toContain(
+      '"@query-param";name="bar": with%20plus%20whitespace'
+    );
+    expect(base).toContain(
+      '"@query-param";name="fa%C3%A7ade%22%3A%20": something'
+    );
+    expect(base).toContain('"@query-param";name="qux": \n');
+  });
+
+  it("rejects duplicate query parameter names", async () => {
+    await expect(
+      createSignature(
+        { ...request, targetUri: "https://example.com/?a=1&a=2" },
+        {
+          components: [component("@query-param", { name: "a" })],
+          parameters: {},
+          signer: { algorithm: "test-alg", sign: () => new Uint8Array() },
+        }
+      )
+    ).rejects.toMatchObject({ code: SignatureErrorCode.InvalidComponent });
+  });
+
+  it("uses HTML UTF-8 decoding without stripping BOM", async () => {
+    let base = "";
+    await createSignature(
+      {
+        ...request,
+        targetUri: "https://example.com/?%EF%BB%BFa=%EF%BB%BFx&invalid=%FF",
+      },
+      {
+        components: [
+          component("@query-param", { name: "%EF%BB%BFa" }),
+          component("@query-param", { name: "invalid" }),
+        ],
+        parameters: {},
+        signer: {
+          algorithm: "test-alg",
+          sign(data) {
+            base = new TextDecoder().decode(data);
+            return new Uint8Array();
+          },
+        },
+      }
+    );
+    expect(base).toContain('"@query-param";name="%EF%BB%BFa": %EF%BB%BFx');
+    expect(base).toContain('"@query-param";name="invalid": %EF%BF%BD');
+  });
+
   it("supports response and related request components", async () => {
     let base = "";
     await createSignature(
@@ -495,16 +710,18 @@ describe("component identities", () => {
       expect.objectContaining({ code: SignatureErrorCode.InvalidComponent })
     );
     for (const value of [
-      () => component("x", { sf: true }),
-      () => component("x", { bs: true }),
-      () => component("x", { tr: true }),
-      () => component("@query-param", { name: "a" }),
-      () => component("@unknown"),
+      () => component("x", { bs: true, sf: true }),
+      () => component("x", { name: "a" }),
+      () => component("@query-param"),
+      () => component("@status", { req: true }),
     ]) {
       expect(value).toThrowError(
-        expect.objectContaining({ code: SignatureErrorCode.UnsupportedFeature })
+        expect.objectContaining({ code: SignatureErrorCode.InvalidComponent })
       );
     }
+    expect(() => component("@unknown")).toThrowError(
+      expect.objectContaining({ code: SignatureErrorCode.UnsupportedFeature })
+    );
   });
 });
 
@@ -715,10 +932,12 @@ describe("verifySignature", () => {
   });
 
   it("captures message data before awaiting the resolver", async () => {
-    const mutableFields = request.fields.map(({ name, value }) => ({
-      name,
-      value,
-    }));
+    const mutableFields: { name: string; value: string }[] = request.fields.map(
+      ({ name, value }) => {
+        if (value instanceof Uint8Array) throw new Error("expected text field");
+        return { name, value };
+      }
+    );
     const mutableMessage: RequestDescriptor = {
       ...request,
       fields: mutableFields,

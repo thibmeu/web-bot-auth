@@ -24,10 +24,19 @@ export interface ComponentDescriptor {
 
 export type SignatureComponent = string | ComponentDescriptor;
 
-export interface FieldOccurrence {
-  readonly name: string;
-  readonly value: string;
-}
+export type StructuredFieldType = "item" | "list" | "dictionary";
+
+export type FieldOccurrence =
+  | {
+      readonly name: string;
+      readonly value: string;
+      readonly structuredType?: StructuredFieldType;
+    }
+  | {
+      readonly name: string;
+      readonly value: Uint8Array;
+      readonly structuredType?: never;
+    };
 
 export interface RequestDescriptor {
   readonly kind: "request";

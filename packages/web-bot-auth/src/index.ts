@@ -171,7 +171,12 @@ function requestHeader(
   if ("kind" in request) {
     const values = request.fields
       .filter((field) => field.name.toLowerCase() === name)
-      .map((field) => field.value.trim());
+      .map((field) => {
+        if (field.value instanceof Uint8Array) {
+          return policyError(`${name} must be a text field`);
+        }
+        return field.value.trim();
+      });
     return values.length === 0 ? undefined : values.join(", ");
   }
   return request.headers.get(name) ?? undefined;

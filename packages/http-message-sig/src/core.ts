@@ -2,13 +2,17 @@ import {
   DisplayString,
   isInnerList,
   parseDictionary,
+  parseItem,
+  parseList,
   serializeDictionary,
   serializeInnerList,
   serializeItem,
+  serializeList,
   type BareItem,
   type Dictionary,
   type InnerList,
   type Item,
+  type List,
   type Parameters,
 } from "structured-headers";
 import { SignatureError, SignatureErrorCode } from "./errors";
@@ -24,6 +28,7 @@ import type {
   SignatureFields,
   SignatureMessage,
   SignatureParameters,
+  StructuredFieldType,
   UntrustedSignatureCandidate,
   VerifiedSignature,
   Verifier,
@@ -32,6 +37,7 @@ import type {
 } from "./types";
 
 const encoder = new TextEncoder();
+const utf8Decoder = new TextDecoder("utf-8", { ignoreBOM: true });
 const fieldNamePattern = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 const sfKeyPattern = /^[a-z*][a-z0-9_.*-]*$/;
 const derivedComponents = new Set([
@@ -42,9 +48,9 @@ const derivedComponents = new Set([
   "@request-target",
   "@path",
   "@query",
+  "@query-param",
   "@status",
 ]);
-const unsupportedParameters = new Set(["sf", "bs", "tr"]);
 
 interface RequestSnapshot {
   readonly kind: "request";
@@ -194,12 +200,6 @@ function copyComponentParameters(
 function normalizeComponentName(name: string): string {
   const normalized = name.toLowerCase();
   if (normalized.startsWith("@")) {
-    if (normalized === "@query-param") {
-      return fail(
-        SignatureErrorCode.UnsupportedFeature,
-        "@query-param is not supported"
-      );
-    }
     if (!derivedComponents.has(normalized)) {
       return fail(
         SignatureErrorCode.UnsupportedFeature,
@@ -224,10 +224,7 @@ function normalizeComponent(input: SignatureComponent): ComponentDescriptor {
 function validateComponent(value: ComponentDescriptor): void {
   const entries = Object.entries(value.parameters);
   for (const [name, parameterValue] of entries) {
-    if (unsupportedParameters.has(name)) {
-      fail(SignatureErrorCode.UnsupportedFeature, `${name} is not supported`);
-    }
-    if (name !== "req" && name !== "key") {
+    if (!["req", "key", "sf", "bs", "tr", "name"].includes(name)) {
       fail(
         SignatureErrorCode.UnsupportedFeature,
         `Component parameter ${name} is not supported`
@@ -239,12 +236,46 @@ function validateComponent(value: ComponentDescriptor): void {
     if (name === "key" && typeof parameterValue !== "string") {
       fail(SignatureErrorCode.InvalidComponent, "key must be a string");
     }
+    if (
+      (name === "sf" || name === "bs" || name === "tr") &&
+      parameterValue !== true
+    ) {
+      fail(SignatureErrorCode.InvalidComponent, `${name} must be true`);
+    }
+    if (name === "name" && typeof parameterValue !== "string") {
+      fail(SignatureErrorCode.InvalidComponent, "name must be a string");
+    }
   }
-  if (value.name.startsWith("@") && value.parameters.key !== undefined) {
+  if (value.parameters.bs && (value.parameters.sf || value.parameters.key)) {
     fail(
       SignatureErrorCode.InvalidComponent,
-      `key is invalid on derived component ${value.name}`
+      "bs cannot be combined with sf or key"
     );
+  }
+  if (value.name === "@query-param") {
+    if (typeof value.parameters.name !== "string") {
+      fail(SignatureErrorCode.InvalidComponent, "@query-param requires name");
+    }
+    if (entries.some(([name]) => name !== "name" && name !== "req")) {
+      fail(
+        SignatureErrorCode.InvalidComponent,
+        "@query-param only supports name and req"
+      );
+    }
+    return;
+  }
+  if (value.name.startsWith("@")) {
+    const allowed = value.name === "@status" ? [] : ["req"];
+    if (entries.some(([name]) => !allowed.includes(name))) {
+      fail(
+        SignatureErrorCode.InvalidComponent,
+        `Invalid parameter on derived component ${value.name}`
+      );
+    }
+    return;
+  }
+  if (value.parameters.name !== undefined) {
+    fail(SignatureErrorCode.InvalidComponent, "name requires @query-param");
   }
 }
 
@@ -302,13 +333,41 @@ function copyFields(
   fields: readonly FieldOccurrence[]
 ): readonly FieldOccurrence[] {
   return Object.freeze(
-    fields.map(({ name, value }) => {
+    fields.map((field) => {
+      const { name, value } = field;
       if (!fieldNamePattern.test(name)) {
         fail(SignatureErrorCode.MalformedField, `Invalid field name ${name}`);
       }
+      if (value instanceof Uint8Array) {
+        if (field.structuredType !== undefined) {
+          fail(
+            SignatureErrorCode.MalformedField,
+            `Binary field ${name} cannot have Structured Field metadata`
+          );
+        }
+        return Object.freeze({
+          name: name.toLowerCase(),
+          value: Uint8Array.from(value),
+        });
+      }
       const normalized = normalizeFieldValue(value);
       validateAscii(normalized, `Field ${name}`);
-      return Object.freeze({ name: name.toLowerCase(), value: normalized });
+      if (
+        field.structuredType !== undefined &&
+        field.structuredType !== "item" &&
+        field.structuredType !== "list" &&
+        field.structuredType !== "dictionary"
+      ) {
+        fail(
+          SignatureErrorCode.MalformedField,
+          `Invalid Structured Field type for ${name}`
+        );
+      }
+      return Object.freeze({
+        name: name.toLowerCase(),
+        value: normalized,
+        structuredType: field.structuredType,
+      });
     })
   );
 }
@@ -401,19 +460,185 @@ function validateAscii(value: string, location: string): void {
   }
 }
 
-function extractField(
+function fieldOccurrences(
   snapshot: RequestSnapshot | ResponseSnapshot,
   name: string,
   trailers: boolean
-): string {
+): readonly FieldOccurrence[] {
   const source = trailers ? snapshot.trailers : snapshot.fields;
-  const values = source
-    .filter((field) => field.name.toLowerCase() === name)
-    .map((field) => normalizeFieldValue(field.value));
+  const values = source.filter((field) => field.name.toLowerCase() === name);
   if (values.length === 0) {
     return fail(SignatureErrorCode.MissingField, `Missing field ${name}`);
   }
-  return values.join(", ");
+  return values;
+}
+
+function textFieldValues(
+  fields: readonly FieldOccurrence[],
+  name: string
+): readonly string[] {
+  return fields.map((field) => {
+    if (field.value instanceof Uint8Array) {
+      return fail(
+        SignatureErrorCode.InvalidComponent,
+        `Binary field ${name} requires bs`
+      );
+    }
+    return normalizeFieldValue(field.value);
+  });
+}
+
+function structuredFieldType(
+  fields: readonly FieldOccurrence[],
+  name: string
+): StructuredFieldType {
+  let selected: StructuredFieldType | undefined;
+  for (const field of fields) {
+    if (
+      field.value instanceof Uint8Array ||
+      field.structuredType === undefined
+    ) {
+      return fail(
+        SignatureErrorCode.InvalidComponent,
+        `Field ${name} requires Structured Field type metadata`
+      );
+    }
+    if (selected !== undefined && selected !== field.structuredType) {
+      return fail(
+        SignatureErrorCode.InvalidComponent,
+        `Field ${name} has inconsistent Structured Field types`
+      );
+    }
+    selected = field.structuredType;
+  }
+  if (selected === undefined) {
+    return fail(SignatureErrorCode.MissingField, `Missing field ${name}`);
+  }
+  return selected;
+}
+
+function strictStructuredField(
+  fields: readonly FieldOccurrence[],
+  name: string
+): string {
+  const type = structuredFieldType(fields, name);
+  const values = textFieldValues(fields, name);
+  if (type === "dictionary") {
+    return serializeDictionary(parseFieldDictionary(values.join(", "), name));
+  }
+  if (type === "list") {
+    return serializeList(parseFieldList(values.join(", "), name));
+  }
+  if (values.length !== 1) {
+    return fail(
+      SignatureErrorCode.InvalidComponent,
+      `Structured Item field ${name} has multiple occurrences`
+    );
+  }
+  return serializeItem(parseFieldItem(values[0], name));
+}
+
+function normalizedBinaryValue(value: Uint8Array): Uint8Array {
+  let start = 0;
+  let end = value.length;
+  while (start < end && (value[start] === 0x20 || value[start] === 0x09)) {
+    start += 1;
+  }
+  while (end > start && (value[end - 1] === 0x20 || value[end - 1] === 0x09)) {
+    end -= 1;
+  }
+  const output: number[] = [];
+  for (let index = start; index < end; index += 1) {
+    if (
+      value[index] === 0x0d &&
+      value[index + 1] === 0x0a &&
+      (value[index + 2] === 0x20 || value[index + 2] === 0x09)
+    ) {
+      output.push(0x20);
+      index += 2;
+      while (
+        index + 1 < end &&
+        (value[index + 1] === 0x20 || value[index + 1] === 0x09)
+      ) {
+        index += 1;
+      }
+      continue;
+    }
+    if (value[index] === 0x0d || value[index] === 0x0a) {
+      return fail(
+        SignatureErrorCode.MalformedField,
+        "Binary field contains an invalid newline"
+      );
+    }
+    if (
+      (value[index] < 0x20 && value[index] !== 0x09) ||
+      value[index] === 0x7f
+    ) {
+      return fail(
+        SignatureErrorCode.MalformedField,
+        "Binary field contains an invalid control byte"
+      );
+    }
+    output.push(value[index]);
+  }
+  return Uint8Array.from(output);
+}
+
+function binaryWrappedField(fields: readonly FieldOccurrence[]): string {
+  const list: List = fields.map((field) => {
+    const bytes =
+      field.value instanceof Uint8Array
+        ? normalizedBinaryValue(field.value)
+        : encoder.encode(normalizeFieldValue(field.value));
+    return [Uint8Array.from(bytes).buffer, new Map()];
+  });
+  return serializeList(list);
+}
+
+function extractField(
+  snapshot: RequestSnapshot | ResponseSnapshot,
+  value: ComponentDescriptor
+): string {
+  const fields = fieldOccurrences(
+    snapshot,
+    value.name,
+    value.parameters.tr === true
+  );
+  if (value.parameters.bs === true) return binaryWrappedField(fields);
+  if (value.parameters.key !== undefined) {
+    const key = value.parameters.key;
+    if (typeof key !== "string") {
+      return fail(SignatureErrorCode.InvalidComponent, "key must be a string");
+    }
+    const knownTypes = fields
+      .filter((field) => !(field.value instanceof Uint8Array))
+      .map((field) => field.structuredType)
+      .filter((type) => type !== undefined);
+    if (knownTypes.some((type) => type !== "dictionary")) {
+      return fail(
+        SignatureErrorCode.InvalidComponent,
+        `Field ${value.name} is not a Structured Dictionary`
+      );
+    }
+    const dictionary = parseFieldDictionary(
+      textFieldValues(fields, value.name).join(", "),
+      value.name
+    );
+    const member = dictionary.get(key);
+    if (member === undefined) {
+      return fail(
+        SignatureErrorCode.MissingField,
+        `Field ${value.name} has no dictionary member ${key}`
+      );
+    }
+    return isInnerList(member)
+      ? serializeInnerList(member)
+      : serializeItem(member);
+  }
+  if (value.parameters.sf === true) {
+    return strictStructuredField(fields, value.name);
+  }
+  return textFieldValues(fields, value.name).join(", ");
 }
 
 function requestForComponent(
@@ -481,10 +706,81 @@ function requestTarget(
   });
 }
 
-function extractDerived(
-  snapshot: RequestSnapshot | ResponseSnapshot,
+function formDecode(input: string): string {
+  const bytes: number[] = [];
+  for (let index = 0; index < input.length; index += 1) {
+    const character = input.charAt(index);
+    if (character === "+") {
+      bytes.push(0x20);
+      continue;
+    }
+    if (
+      character === "%" &&
+      /^[0-9A-Fa-f]{2}$/.test(input.slice(index + 1, index + 3))
+    ) {
+      bytes.push(Number.parseInt(input.slice(index + 1, index + 3), 16));
+      index += 2;
+      continue;
+    }
+    bytes.push(input.charCodeAt(index));
+  }
+  return utf8Decoder.decode(Uint8Array.from(bytes));
+}
+
+function formEncode(input: string): string {
+  let output = "";
+  for (const byte of encoder.encode(input)) {
+    if (
+      (byte >= 0x41 && byte <= 0x5a) ||
+      (byte >= 0x61 && byte <= 0x7a) ||
+      (byte >= 0x30 && byte <= 0x39) ||
+      byte === 0x2a ||
+      byte === 0x2d ||
+      byte === 0x2e ||
+      byte === 0x5f
+    ) {
+      output += String.fromCharCode(byte);
+    } else {
+      output += `%${byte.toString(16).toUpperCase().padStart(2, "0")}`;
+    }
+  }
+  return output;
+}
+
+function queryParameter(
+  target: ReturnType<typeof requestTarget>,
   name: string
 ): string {
+  const matches: string[] = [];
+  for (const field of target.query.slice(1).split("&")) {
+    if (field === "") continue;
+    const separator = field.indexOf("=");
+    const rawName = separator === -1 ? field : field.slice(0, separator);
+    const rawValue = separator === -1 ? "" : field.slice(separator + 1);
+    if (formEncode(formDecode(rawName)) === name) {
+      matches.push(formEncode(formDecode(rawValue)));
+    }
+  }
+  if (matches.length === 0) {
+    return fail(
+      SignatureErrorCode.MissingField,
+      `Query parameter ${name} is missing`
+    );
+  }
+  if (matches.length !== 1) {
+    return fail(
+      SignatureErrorCode.InvalidComponent,
+      `Query parameter ${name} occurs more than once`
+    );
+  }
+  return matches[0];
+}
+
+function extractDerived(
+  snapshot: RequestSnapshot | ResponseSnapshot,
+  value: ComponentDescriptor
+): string {
+  const { name } = value;
   if (name === "@status") {
     if (snapshot.kind !== "response") {
       return fail(
@@ -521,6 +817,14 @@ function extractDerived(
       return target.path;
     case "@query":
       return target.query;
+    case "@query-param":
+      if (typeof value.parameters.name !== "string") {
+        return fail(
+          SignatureErrorCode.InvalidComponent,
+          "@query-param requires name"
+        );
+      }
+      return queryParameter(target, value.parameters.name);
     default:
       return fail(
         SignatureErrorCode.UnsupportedFeature,
@@ -534,24 +838,8 @@ function extractComponentValue(
   value: ComponentDescriptor
 ): string {
   const selected = requestForComponent(snapshot, value);
-  if (value.name.startsWith("@")) return extractDerived(selected, value.name);
-  const fieldValue = extractField(selected, value.name, false);
-  const key = value.parameters.key;
-  if (key === undefined) return fieldValue;
-  if (typeof key !== "string") {
-    return fail(SignatureErrorCode.InvalidComponent, "key must be a string");
-  }
-  const dictionary = parseRfc8941Dictionary(fieldValue, `field ${value.name}`);
-  const member = dictionary.get(key);
-  if (member === undefined) {
-    return fail(
-      SignatureErrorCode.MissingField,
-      `Field ${value.name} has no dictionary member ${key}`
-    );
-  }
-  return isInnerList(member)
-    ? serializeInnerList(member)
-    : serializeItem(member);
+  if (value.name.startsWith("@")) return extractDerived(selected, value);
+  return extractField(selected, value);
 }
 
 function componentsToInnerList(
@@ -715,37 +1003,29 @@ function parsedParameterCount(dictionary: Dictionary): number {
   return count;
 }
 
-function assertNoRfc9651Syntax(input: string, name: string): void {
-  let quoted = false;
-  let escaped = false;
-  for (let index = 0; index < input.length; index += 1) {
-    const character = input[index];
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (quoted && character === "\\") {
-      escaped = true;
-      continue;
-    }
-    if (character === '"') {
-      quoted = !quoted;
-      continue;
-    }
-    if (
-      !quoted &&
-      (character === "@" || (character === "%" && input[index + 1] === '"'))
-    ) {
-      fail(
-        SignatureErrorCode.UnsupportedFeature,
-        `${name} uses an RFC 9651-only value`
-      );
-    }
+function parseFieldItem(input: string, name: string): Item {
+  let item: Item;
+  try {
+    item = parseItem(input);
+  } catch (error) {
+    return fail(SignatureErrorCode.MalformedField, `Malformed ${name}`, error);
   }
+  assertRfc8941Item(item, name);
+  return item;
 }
 
-function parseRfc8941Dictionary(input: string, name: string): Dictionary {
-  assertNoRfc9651Syntax(input, name);
+function parseFieldList(input: string, name: string): List {
+  let list: List;
+  try {
+    list = parseList(input);
+  } catch (error) {
+    return fail(SignatureErrorCode.MalformedField, `Malformed ${name}`, error);
+  }
+  assertRfc8941List(list, name);
+  return list;
+}
+
+function parseFieldDictionary(input: string, name: string): Dictionary {
   let dictionary: Dictionary;
   try {
     dictionary = parseDictionary(input);
@@ -757,7 +1037,12 @@ function parseRfc8941Dictionary(input: string, name: string): Dictionary {
 }
 
 function parseStrictDictionary(input: string, name: string): Dictionary {
-  const dictionary = parseRfc8941Dictionary(input, name);
+  let dictionary: Dictionary;
+  try {
+    dictionary = parseDictionary(input);
+  } catch (error) {
+    return fail(SignatureErrorCode.MalformedField, `Malformed ${name}`, error);
+  }
   if (topLevelMemberCount(input) !== dictionary.size) {
     return fail(
       SignatureErrorCode.DuplicateLabel,
@@ -773,24 +1058,33 @@ function parseStrictDictionary(input: string, name: string): Dictionary {
   return dictionary;
 }
 
-function assertRfc8941Dictionary(dictionary: Dictionary, name: string): void {
-  for (const member of dictionary.values()) {
+function assertRfc8941Item(item: Item, name: string): void {
+  validateBareItem(item[0], name);
+  for (const parameter of item[1].values()) {
+    validateBareItem(parameter, name);
+  }
+}
+
+function assertRfc8941List(list: List, name: string): void {
+  for (const member of list) {
     if (isInnerList(member)) {
-      for (const [value, parameters] of member[0]) {
-        validateBareItem(value, name);
-        for (const parameter of parameters.values())
-          validateBareItem(parameter, name);
+      for (const item of member[0]) assertRfc8941Item(item, name);
+      for (const parameter of member[1].values()) {
+        validateBareItem(parameter, name);
       }
     } else {
-      validateBareItem(member[0], name);
+      assertRfc8941Item(member, name);
     }
-    for (const parameter of member[1].values())
-      validateBareItem(parameter, name);
   }
+}
+
+function assertRfc8941Dictionary(dictionary: Dictionary, name: string): void {
+  assertRfc8941List([...dictionary.values()], name);
 }
 
 function parseSignatureDictionary(input: string): Dictionary {
   const dictionary = parseStrictDictionary(input, "Signature");
+  assertRfc8941Dictionary(dictionary, "Signature");
   for (const member of dictionary.values()) {
     if (
       isInnerList(member) ||
@@ -808,6 +1102,7 @@ function parseSignatureDictionary(input: string): Dictionary {
 
 function parseSignatureInputDictionary(input: string): Dictionary {
   const dictionary = parseStrictDictionary(input, "Signature-Input");
+  assertRfc8941Dictionary(dictionary, "Signature-Input");
   for (const member of dictionary.values()) {
     if (!isInnerList(member)) {
       fail(
@@ -950,7 +1245,7 @@ export function appendSignature(
 }
 
 function getRequiredField(snapshot: MessageSnapshot, name: string): string {
-  return extractField(snapshot, name, false);
+  return extractField(snapshot, { name, parameters: {} });
 }
 
 function assertPolicyCoverage<V extends Verifier>(

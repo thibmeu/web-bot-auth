@@ -42,7 +42,11 @@ export function createWebCryptoSigner(key: CryptoKey): Signer {
     algorithm,
     async sign(data: Uint8Array): Promise<Uint8Array> {
       return new Uint8Array(
-        await crypto.subtle.sign(cryptoParameters(key), key, data)
+        await crypto.subtle.sign(
+          cryptoParameters(key),
+          key,
+          Uint8Array.from(data).buffer
+        )
       );
     },
   });
@@ -59,7 +63,12 @@ export function createWebCryptoVerifier(key: CryptoKey): Verifier {
   return Object.freeze({
     algorithm,
     verify(data: Uint8Array, signature: Uint8Array): Promise<boolean> {
-      return crypto.subtle.verify(cryptoParameters(key), key, signature, data);
+      return crypto.subtle.verify(
+        cryptoParameters(key),
+        key,
+        Uint8Array.from(signature).buffer,
+        Uint8Array.from(data).buffer
+      );
     },
   });
 }

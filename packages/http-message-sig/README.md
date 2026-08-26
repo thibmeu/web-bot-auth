@@ -5,19 +5,22 @@ Signatures for TypeScript.
 
 ## Capabilities
 
-| Capability                                 | Support                                                                                            |
-| ------------------------------------------ | -------------------------------------------------------------------------------------------------- |
-| Native `Request` and `Response`            | Yes, using Fetch-observable values                                                                 |
-| Final request/response descriptors         | Yes, with ordered field occurrences and optional trailers                                          |
-| Related request components (`req`)         | Yes, on response descriptors                                                                       |
-| Ordinary field components                  | Yes                                                                                                |
-| Structured Field dictionary member (`key`) | Yes, strict RFC 8941 parsing                                                                       |
-| Derived components                         | `@method`, `@target-uri`, `@authority`, `@scheme`, `@request-target`, `@path`, `@query`, `@status` |
-| Multiple signatures                        | Yes                                                                                                |
-| Async signing and verification             | Yes                                                                                                |
-| Synchronous signing                        | Yes                                                                                                |
-| Explicit verification policy               | Required                                                                                           |
-| WebCrypto providers                        | Ed25519 and RSA-PSS with SHA-512                                                                   |
+| Capability                                 | Support                                                   |
+| ------------------------------------------ | --------------------------------------------------------- |
+| Native `Request` and `Response`            | Yes, using Fetch-observable values                        |
+| Final request/response descriptors         | Yes, with ordered field occurrences and optional trailers |
+| Related request components (`req`)         | Yes, on response descriptors                              |
+| Ordinary field components                  | Yes                                                       |
+| Strict Structured Fields (`sf`)            | Yes, using descriptor type metadata                       |
+| Structured Field dictionary member (`key`) | Yes, strict RFC 8941 parsing                              |
+| Binary-wrapped fields (`bs`)               | Yes, including raw descriptor bytes                       |
+| Trailer fields (`tr`)                      | Yes, using descriptors                                    |
+| Derived components                         | All RFC 9421 derived components, including `@query-param` |
+| Multiple signatures                        | Yes                                                       |
+| Async signing and verification             | Yes                                                       |
+| Synchronous signing                        | Yes                                                       |
+| Explicit verification policy               | Required                                                  |
+| WebCrypto providers                        | Ed25519 and RSA-PSS with SHA-512                          |
 
 ## Signing
 
@@ -41,6 +44,10 @@ and merges both signature dictionaries.
 Use `component("example-dict", { key: "member" })` for parameterized
 components. `componentIdentity` returns the exact serialized component
 identifier.
+
+Descriptors can provide `Uint8Array` field values for `bs` and
+`structuredType: "item" | "list" | "dictionary"` for `sf`. Fetch objects
+cannot expose raw field occurrences, raw bytes, or trailers.
 
 ## Verification
 
@@ -67,10 +74,10 @@ only after successful cryptographic verification.
 
 ## Limitations
 
-- `sf`, `bs`, `tr`, `@query-param`, and unknown derived components are rejected
+- Unknown derived components and extension component parameters are rejected
   with `UnsupportedFeature`.
-- RFC 9651 dates and display strings are rejected in signature fields. Signature
-  metadata is limited to RFC 8941 bare items.
+- RFC 9651 dates and display strings are rejected. Signature metadata and
+  covered Structured Fields are limited to RFC 8941 values.
 - Fetch does not expose raw field occurrences or trailers. Use descriptors when
   those values matter.
 - `Response` has no related request. Use a response descriptor for `req`.
