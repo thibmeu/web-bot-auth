@@ -1003,7 +1003,37 @@ function parsedParameterCount(dictionary: Dictionary): number {
   return count;
 }
 
+function assertNoRfc9651Syntax(input: string, name: string): void {
+  let quoted = false;
+  let escaped = false;
+  for (let index = 0; index < input.length; index += 1) {
+    const character = input[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (quoted && character === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (character === '"') {
+      quoted = !quoted;
+      continue;
+    }
+    if (
+      !quoted &&
+      (character === "@" || (character === "%" && input[index + 1] === '"'))
+    ) {
+      fail(
+        SignatureErrorCode.UnsupportedFeature,
+        `${name} uses an RFC 9651-only value`
+      );
+    }
+  }
+}
+
 function parseFieldItem(input: string, name: string): Item {
+  assertNoRfc9651Syntax(input, name);
   let item: Item;
   try {
     item = parseItem(input);
@@ -1015,6 +1045,7 @@ function parseFieldItem(input: string, name: string): Item {
 }
 
 function parseFieldList(input: string, name: string): List {
+  assertNoRfc9651Syntax(input, name);
   let list: List;
   try {
     list = parseList(input);
@@ -1026,6 +1057,7 @@ function parseFieldList(input: string, name: string): List {
 }
 
 function parseFieldDictionary(input: string, name: string): Dictionary {
+  assertNoRfc9651Syntax(input, name);
   let dictionary: Dictionary;
   try {
     dictionary = parseDictionary(input);
@@ -1037,12 +1069,7 @@ function parseFieldDictionary(input: string, name: string): Dictionary {
 }
 
 function parseStrictDictionary(input: string, name: string): Dictionary {
-  let dictionary: Dictionary;
-  try {
-    dictionary = parseDictionary(input);
-  } catch (error) {
-    return fail(SignatureErrorCode.MalformedField, `Malformed ${name}`, error);
-  }
+  const dictionary = parseFieldDictionary(input, name);
   if (topLevelMemberCount(input) !== dictionary.size) {
     return fail(
       SignatureErrorCode.DuplicateLabel,
@@ -1084,7 +1111,6 @@ function assertRfc8941Dictionary(dictionary: Dictionary, name: string): void {
 
 function parseSignatureDictionary(input: string): Dictionary {
   const dictionary = parseStrictDictionary(input, "Signature");
-  assertRfc8941Dictionary(dictionary, "Signature");
   for (const member of dictionary.values()) {
     if (
       isInnerList(member) ||
@@ -1102,7 +1128,6 @@ function parseSignatureDictionary(input: string): Dictionary {
 
 function parseSignatureInputDictionary(input: string): Dictionary {
   const dictionary = parseStrictDictionary(input, "Signature-Input");
-  assertRfc8941Dictionary(dictionary, "Signature-Input");
   for (const member of dictionary.values()) {
     if (!isInnerList(member)) {
       fail(
